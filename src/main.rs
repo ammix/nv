@@ -3,9 +3,9 @@ use std::env;
 use std::error::Error;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{Read, Write};
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt, symlink};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -15,6 +15,10 @@ const ARCHIVE_ROOT: &str = "nvim-linux-x86_64";
 const GITHUB_API_VERSION: &str = "2026-03-10";
 const STABLE_API_URL: &str = "https://api.github.com/repos/neovim/neovim/releases/latest";
 const NIGHTLY_API_URL: &str = "https://api.github.com/repos/neovim/neovim/releases/tags/nightly";
+const MAX_API_RESPONSE_SIZE: u64 = 10 * 1024 * 1024;
+const MAX_ASSET_SIZE: u64 = 512 * 1024 * 1024;
+const API_TIMEOUT_SECONDS: u64 = 60;
+const ASSET_TIMEOUT_SECONDS: u64 = 600;
 const USAGE: &str = "Usage:
   nv install stable|nightly
   nv use stable|nightly
@@ -158,6 +162,7 @@ struct Paths {
     staging: PathBuf,
     active: PathBuf,
     lock: PathBuf,
+    transaction: PathBuf,
     local_bin: PathBuf,
     nvim_link: PathBuf,
 }
@@ -186,6 +191,7 @@ impl Paths {
             staging: state.join("staging"),
             active: state.join("active"),
             lock: state.join("operation.lock"),
+            transaction: state.join("pointer.transaction"),
             nvim_link: local_bin.join("nvim"),
             local_bin,
             state,
@@ -301,6 +307,54 @@ struct RemoteRelease {
     url: String,
     sha256: String,
     size: u64,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct PointerTransaction {
+    channel: Channel,
+    current: String,
+    previous: Option<String>,
+}
+
+impl PointerTransaction {
+    fn parse(contents: &str, path: &Path) -> Result<Self> {
+        let lines: Vec<&str> = contents.lines().collect();
+        if lines.len() != 3 {
+            return Err(error(format!(
+                "malformed pointer transaction at {}: expected exactly 3 lines",
+                path.display()
+            )));
+        }
+        let channel = Channel::parse(OsStr::new(lines[0]))?;
+        validate_transaction_install(lines[1], channel, path)?;
+        let previous = match lines[2] {
+            "none" => None,
+            value => {
+                validate_transaction_install(value, channel, path)?;
+                Some(value.to_owned())
+            }
+        };
+        if previous.as_deref() == Some(lines[1]) {
+            return Err(error(format!(
+                "malformed pointer transaction at {}: current and previous are identical",
+                path.display()
+            )));
+        }
+        Ok(Self {
+            channel,
+            current: lines[1].to_owned(),
+            previous,
+        })
+    }
+
+    fn serialize(&self) -> String {
+        format!(
+            "{}\n{}\n{}\n",
+            self.channel,
+            self.current,
+            self.previous.as_deref().unwrap_or("none")
+        )
+    }
 }
 
 struct LockGuard {
@@ -451,6 +505,7 @@ fn run() -> Result<()> {
             prepare_state_root(&paths)?;
             with_lock(&paths, || {
                 ensure_layout(&paths)?;
+                validate_activation_destination(&paths)?;
                 install_channel(&paths, channel)?;
                 activate_channel(&paths, channel)
             })
@@ -502,14 +557,9 @@ fn preflight_external_programs() -> Result<()> {
 
 fn prepare_state_root(paths: &Paths) -> Result<()> {
     match fs::symlink_metadata(&paths.state) {
-        Ok(metadata) => require_real_directory(&paths.state, &metadata),
+        Ok(metadata) => require_secure_directory(&paths.state, &metadata),
         Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => {
-            fs::create_dir_all(&paths.state).map_err(|cause| {
-                error(format!(
-                    "failed to create state directory {}: {cause}",
-                    paths.state.display()
-                ))
-            })
+            create_private_dir(&paths.state)
         }
         Err(cause) => Err(error(format!(
             "failed to inspect state directory {}: {cause}",
@@ -532,12 +582,12 @@ fn require_state_root(paths: &Paths) -> Result<()> {
             ))
         }
     })?;
-    require_real_directory(&paths.state, &metadata)
+    require_secure_directory(&paths.state, &metadata)
 }
 
 fn with_lock<T>(paths: &Paths, operation: impl FnOnce() -> Result<T>) -> Result<T> {
     let lock = LockGuard::acquire(paths)?;
-    let result = operation();
+    let result = recover_pointer_transaction(paths).and_then(|()| operation());
     let unlock = lock.release();
     match (result, unlock) {
         (Ok(value), Ok(())) => Ok(value),
@@ -567,12 +617,7 @@ fn ensure_layout(paths: &Paths) -> Result<()> {
         .count();
     if existing == 0 {
         for path in required {
-            fs::create_dir_all(&path).map_err(|cause| {
-                error(format!(
-                    "failed to create state directory {}: {cause}",
-                    path.display()
-                ))
-            })?;
+            create_private_dir(&path)?;
         }
         return Ok(());
     }
@@ -602,6 +647,28 @@ fn require_real_directory(path: &Path, metadata: &fs::Metadata) -> Result<()> {
     Ok(())
 }
 
+fn require_secure_directory(path: &Path, metadata: &fs::Metadata) -> Result<()> {
+    require_real_directory(path, metadata)?;
+    if metadata.permissions().mode() & 0o022 != 0 {
+        return Err(error(format!(
+            "refusing writable-by-group-or-others directory {}; remove group/other write permissions",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn create_private_dir(path: &Path) -> Result<()> {
+    let mut builder = DirBuilder::new();
+    builder.recursive(true).mode(0o700);
+    builder.create(path).map_err(|cause| {
+        error(format!(
+            "failed to create private directory {}: {cause}",
+            path.display()
+        ))
+    })
+}
+
 fn install_channel(paths: &Paths, channel: Channel) -> Result<()> {
     let state = read_channel_state(paths, channel)?;
     let staging = StagingGuard::create(paths, channel)?;
@@ -619,48 +686,67 @@ fn install_channel(paths: &Paths, channel: Channel) -> Result<()> {
     }
 
     let final_path = paths.install_dir(channel, &release.id);
-    if fs::symlink_metadata(&final_path).is_ok() {
-        return Err(error(format!(
-            "immutable installation path {} already exists for release {}; inspect it manually",
-            final_path.display(),
-            release.id
-        )));
-    }
-    let archive = staging.path.join(format!("{ASSET_NAME}.part"));
-    download_asset(&release, &archive)?;
-    verify_size(&archive, release.size)?;
-    verify_archive_digest(&archive, &release.sha256)?;
+    let metadata = match fs::symlink_metadata(&final_path) {
+        Ok(_) => {
+            let metadata = read_installation(paths, &final_path, Some(channel))?;
+            if metadata.release != release.id || metadata.sha256 != release.sha256 {
+                return Err(error(format!(
+                    "immutable installation path {} conflicts with release {}; inspect it manually",
+                    final_path.display(),
+                    release.id
+                )));
+            }
+            metadata
+        }
+        Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => {
+            let archive = staging.path.join(format!("{ASSET_NAME}.part"));
+            download_asset(&release, &archive)?;
+            verify_size(&archive, release.size)?;
+            verify_archive_digest(&archive, &release.sha256)?;
 
-    let extraction = staging.path.join("extracted");
-    fs::create_dir(&extraction).map_err(|cause| {
-        error(format!(
-            "failed to create extraction directory {}: {cause}",
-            extraction.display()
-        ))
-    })?;
-    extract_archive(&archive, &extraction)?;
-    let installation = validate_extracted_layout(&extraction)?;
-    let version = staged_version(&installation)?;
-    let metadata = InstallMetadata {
-        channel,
-        release: release.id.clone(),
-        version,
-        asset: ASSET_NAME.to_owned(),
-        sha256: release.sha256,
+            let extraction = staging.path.join("extracted");
+            fs::create_dir(&extraction).map_err(|cause| {
+                error(format!(
+                    "failed to create extraction directory {}: {cause}",
+                    extraction.display()
+                ))
+            })?;
+            extract_archive(&archive, &extraction)?;
+            let installation = validate_extracted_layout(&extraction)?;
+            let version = staged_version(&installation)?;
+            let metadata = InstallMetadata {
+                channel,
+                release: release.id.clone(),
+                version,
+                asset: ASSET_NAME.to_owned(),
+                sha256: release.sha256,
+            };
+            write_metadata(&installation.join(".nv-metadata"), &metadata)?;
+            sync_directory(&installation)?;
+            fs::rename(&installation, &final_path).map_err(|cause| {
+                error(format!(
+                    "failed to publish staged installation {} as {}: {cause}",
+                    installation.display(),
+                    final_path.display()
+                ))
+            })?;
+            sync_directory(&paths.installs)?;
+            metadata
+        }
+        Err(cause) => {
+            return Err(error(format!(
+                "failed to inspect immutable installation path {}: {cause}",
+                final_path.display()
+            )));
+        }
     };
-    write_metadata(&installation.join(".nv-metadata"), &metadata)?;
-    sync_directory(&installation)?;
-    fs::rename(&installation, &final_path).map_err(|cause| {
-        error(format!(
-            "failed to publish staged installation {} as {}: {cause}",
-            installation.display(),
-            final_path.display()
-        ))
-    })?;
-    sync_directory(&paths.installs)?;
     replace_channel_pointers(paths, channel, state.current.as_ref(), &metadata)?;
-    cleanup_unreferenced_installs(paths)?;
-    staging.finish()?;
+    if let Err(cause) = cleanup_unreferenced_installs(paths) {
+        eprintln!("nv: warning: installation committed, but cleanup failed: {cause}");
+    }
+    if let Err(cause) = staging.finish() {
+        eprintln!("nv: warning: installation committed, but staging cleanup failed: {cause}");
+    }
     println!(
         "installed {channel} {} (release {})",
         metadata.version, metadata.release
@@ -670,7 +756,13 @@ fn install_channel(paths: &Paths, channel: Channel) -> Result<()> {
 
 fn resolve_release(channel: Channel, staging: &Path) -> Result<RemoteRelease> {
     let response_path = staging.join("release.json");
-    curl_to_file(channel.api_url(), &response_path, true)?;
+    curl_to_file(
+        channel.api_url(),
+        &response_path,
+        true,
+        MAX_API_RESPONSE_SIZE,
+        API_TIMEOUT_SECONDS,
+    )?;
     let filter = r#"
       (.assets // error("missing assets")) as $assets
       | ($assets | map(select(.name == $asset))) as $matches
@@ -734,6 +826,13 @@ fn resolve_release(channel: Channel, staging: &Path) -> Result<RemoteRelease> {
             response_path.display()
         )));
     }
+    if size > MAX_ASSET_SIZE {
+        return Err(error(format!(
+            "asset size from {} exceeds the {} byte safety limit",
+            response_path.display(),
+            MAX_ASSET_SIZE
+        )));
+    }
     Ok(RemoteRelease {
         id: lines[0].to_owned(),
         url: lines[1].to_owned(),
@@ -742,7 +841,13 @@ fn resolve_release(channel: Channel, staging: &Path) -> Result<RemoteRelease> {
     })
 }
 
-fn curl_to_file(url: &str, destination: &Path, api_request: bool) -> Result<()> {
+fn curl_to_file(
+    url: &str,
+    destination: &Path,
+    api_request: bool,
+    max_size: u64,
+    timeout_seconds: u64,
+) -> Result<()> {
     let mut command = Command::new("curl");
     command
         .arg("--silent")
@@ -753,6 +858,12 @@ fn curl_to_file(url: &str, destination: &Path, api_request: bool) -> Result<()> 
         .arg("=https")
         .arg("--proto-redir")
         .arg("=https")
+        .arg("--connect-timeout")
+        .arg("15")
+        .arg("--max-time")
+        .arg(timeout_seconds.to_string())
+        .arg("--max-filesize")
+        .arg(max_size.to_string())
         .arg("--header")
         .arg("User-Agent: nv/0.1.0")
         .arg("--output")
@@ -787,7 +898,13 @@ fn curl_to_file(url: &str, destination: &Path, api_request: bool) -> Result<()> 
 }
 
 fn download_asset(release: &RemoteRelease, destination: &Path) -> Result<()> {
-    curl_to_file(&release.url, destination, false)
+    curl_to_file(
+        &release.url,
+        destination,
+        false,
+        release.size,
+        ASSET_TIMEOUT_SECONDS,
+    )
 }
 
 fn verify_size(path: &Path, expected: u64) -> Result<()> {
@@ -1014,19 +1131,14 @@ fn replace_channel_pointers(
     old_current: Option<&Installation>,
     new_metadata: &InstallMetadata,
 ) -> Result<()> {
-    if let Some(old) = old_current {
-        atomic_symlink_replace(
-            &paths.channel_link(channel, "previous"),
-            &channel_relative_target(&old.directory_name),
-        )?;
-    }
-    let new_name = format!("{channel}-{}", new_metadata.release);
-    atomic_symlink_replace(
-        &paths.channel_link(channel, "current"),
-        &channel_relative_target(&new_name),
-    )?;
-    read_channel_state(paths, channel)?;
-    sync_directory(&paths.channel_dir(channel))
+    commit_pointer_transaction(
+        paths,
+        &PointerTransaction {
+            channel,
+            current: format!("{channel}-{}", new_metadata.release),
+            previous: old_current.map(|installation| installation.directory_name.clone()),
+        },
+    )
 }
 
 fn channel_relative_target(directory_name: &str) -> PathBuf {
@@ -1039,19 +1151,38 @@ fn atomic_symlink_replace(link: &Path, target: &Path) -> Result<()> {
         .and_then(OsStr::to_str)
         .ok_or_else(|| error(format!("invalid symlink path {}", link.display())))?;
     let temporary = link.with_file_name(format!(".{name}.nv-new"));
-    if fs::symlink_metadata(&temporary).is_ok() {
-        return Err(error(format!(
-            "temporary link {} already exists; inspect it and move it to the trash manually",
-            temporary.display()
-        )));
+    match fs::symlink_metadata(&temporary) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_symlink()
+                || fs::read_link(&temporary).map_err(|cause| {
+                    error(format!(
+                        "failed to read temporary symlink {}: {cause}",
+                        temporary.display()
+                    ))
+                })? != target
+            {
+                return Err(error(format!(
+                    "temporary link {} does not match the pending transaction",
+                    temporary.display()
+                )));
+            }
+        }
+        Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => {
+            symlink(target, &temporary).map_err(|cause| {
+                error(format!(
+                    "failed to create temporary symlink {} -> {}: {cause}",
+                    temporary.display(),
+                    target.display()
+                ))
+            })?;
+        }
+        Err(cause) => {
+            return Err(error(format!(
+                "failed to inspect temporary symlink {}: {cause}",
+                temporary.display()
+            )));
+        }
     }
-    symlink(target, &temporary).map_err(|cause| {
-        error(format!(
-            "failed to create temporary symlink {} -> {}: {cause}",
-            temporary.display(),
-            target.display()
-        ))
-    })?;
     if let Err(cause) = fs::rename(&temporary, link) {
         let _ = fs::remove_file(&temporary);
         return Err(error(format!(
@@ -1061,6 +1192,132 @@ fn atomic_symlink_replace(link: &Path, target: &Path) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+fn commit_pointer_transaction(paths: &Paths, transaction: &PointerTransaction) -> Result<()> {
+    let temporary = paths
+        .transaction
+        .with_file_name(".pointer.transaction.nv-new");
+    if fs::symlink_metadata(&paths.transaction).is_ok() || fs::symlink_metadata(&temporary).is_ok()
+    {
+        return Err(error(format!(
+            "pointer transaction state already exists under {}; inspect it manually",
+            paths.state.display()
+        )));
+    }
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .map_err(|cause| {
+            error(format!(
+                "failed to create pointer transaction {}: {cause}",
+                temporary.display()
+            ))
+        })?;
+    if let Err(cause) = file
+        .write_all(transaction.serialize().as_bytes())
+        .and_then(|()| file.sync_all())
+    {
+        let _ = fs::remove_file(&temporary);
+        return Err(error(format!(
+            "failed to persist pointer transaction {}: {cause}",
+            temporary.display()
+        )));
+    }
+    fs::rename(&temporary, &paths.transaction).map_err(|cause| {
+        error(format!(
+            "failed to publish pointer transaction {}: {cause}",
+            paths.transaction.display()
+        ))
+    })?;
+    sync_directory(&paths.state)?;
+    finish_pointer_transaction(paths, transaction)
+}
+
+fn recover_pointer_transaction(paths: &Paths) -> Result<()> {
+    let temporary = paths
+        .transaction
+        .with_file_name(".pointer.transaction.nv-new");
+    let transaction_metadata = match fs::symlink_metadata(&paths.transaction) {
+        Ok(metadata) => Some(metadata),
+        Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => None,
+        Err(cause) => {
+            return Err(error(format!(
+                "failed to inspect pointer transaction {}: {cause}",
+                paths.transaction.display()
+            )));
+        }
+    };
+    if transaction_metadata.is_none() {
+        if fs::symlink_metadata(&temporary).is_ok() {
+            fs::remove_file(&temporary).map_err(|cause| {
+                error(format!(
+                    "failed to remove unpublished pointer transaction {}: {cause}",
+                    temporary.display()
+                ))
+            })?;
+            sync_directory(&paths.state)?;
+        }
+        return Ok(());
+    }
+    let metadata = transaction_metadata.expect("checked above");
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(error(format!(
+            "pointer transaction {} is not a regular file",
+            paths.transaction.display()
+        )));
+    }
+    if fs::symlink_metadata(&temporary).is_ok() {
+        fs::remove_file(&temporary).map_err(|cause| {
+            error(format!(
+                "failed to remove stale pointer transaction {}: {cause}",
+                temporary.display()
+            ))
+        })?;
+    }
+    let contents = fs::read_to_string(&paths.transaction).map_err(|cause| {
+        error(format!(
+            "failed to read pointer transaction {}: {cause}",
+            paths.transaction.display()
+        ))
+    })?;
+    let transaction = PointerTransaction::parse(&contents, &paths.transaction)?;
+    finish_pointer_transaction(paths, &transaction)
+}
+
+fn finish_pointer_transaction(paths: &Paths, transaction: &PointerTransaction) -> Result<()> {
+    let current_path = paths.installs.join(&transaction.current);
+    read_installation(paths, &current_path, Some(transaction.channel))?;
+    if let Some(previous) = &transaction.previous {
+        read_installation(
+            paths,
+            &paths.installs.join(previous),
+            Some(transaction.channel),
+        )?;
+        atomic_symlink_replace(
+            &paths.channel_link(transaction.channel, "previous"),
+            &channel_relative_target(previous),
+        )?;
+    } else if fs::symlink_metadata(paths.channel_link(transaction.channel, "previous")).is_ok() {
+        return Err(error(format!(
+            "pointer transaction expected no previous {} installation",
+            transaction.channel
+        )));
+    }
+    atomic_symlink_replace(
+        &paths.channel_link(transaction.channel, "current"),
+        &channel_relative_target(&transaction.current),
+    )?;
+    read_channel_state(paths, transaction.channel)?;
+    sync_directory(&paths.channel_dir(transaction.channel))?;
+    fs::remove_file(&paths.transaction).map_err(|cause| {
+        error(format!(
+            "pointer transaction completed but failed to remove {}: {cause}",
+            paths.transaction.display()
+        ))
+    })?;
+    sync_directory(&paths.state)
 }
 
 fn read_channel_state(paths: &Paths, channel: Channel) -> Result<ChannelState> {
@@ -1224,6 +1481,17 @@ fn parse_install_name(name: &str) -> Result<(Channel, &str)> {
     )))
 }
 
+fn validate_transaction_install(name: &str, expected_channel: Channel, path: &Path) -> Result<()> {
+    let (channel, _) = parse_install_name(name)?;
+    if channel != expected_channel {
+        return Err(error(format!(
+            "pointer transaction {} references {channel} installation {name}, expected {expected_channel}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
 fn update_installed(paths: &Paths, selection: UpdateSelection) -> Result<()> {
     match selection {
         UpdateSelection::Channel(channel) => {
@@ -1279,14 +1547,9 @@ fn activate_channel(paths: &Paths, channel: Channel) -> Result<()> {
 
 fn ensure_nvim_link(paths: &Paths) -> Result<()> {
     match fs::symlink_metadata(&paths.local_bin) {
-        Ok(metadata) => require_real_directory(&paths.local_bin, &metadata)?,
+        Ok(metadata) => require_secure_directory(&paths.local_bin, &metadata)?,
         Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => {
-            fs::create_dir_all(&paths.local_bin).map_err(|cause| {
-                error(format!(
-                    "failed to create executable directory {}: {cause}",
-                    paths.local_bin.display()
-                ))
-            })?;
+            create_private_dir(&paths.local_bin)?;
         }
         Err(cause) => {
             return Err(error(format!(
@@ -1297,27 +1560,7 @@ fn ensure_nvim_link(paths: &Paths) -> Result<()> {
     }
     let expected = Path::new("../share/nv/active/bin/nvim");
     match fs::symlink_metadata(&paths.nvim_link) {
-        Ok(metadata) => {
-            if !metadata.file_type().is_symlink() {
-                return Err(error(format!(
-                    "refusing to replace unmanaged executable {}",
-                    paths.nvim_link.display()
-                )));
-            }
-            let target = fs::read_link(&paths.nvim_link).map_err(|cause| {
-                error(format!(
-                    "failed to read executable symlink {}: {cause}",
-                    paths.nvim_link.display()
-                ))
-            })?;
-            if target != expected {
-                return Err(error(format!(
-                    "refusing to replace unmanaged executable symlink {} -> {}",
-                    paths.nvim_link.display(),
-                    target.display()
-                )));
-            }
-        }
+        Ok(metadata) => validate_existing_nvim_link(paths, &metadata)?,
         Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => {
             atomic_symlink_replace(&paths.nvim_link, expected)?;
             sync_directory(&paths.local_bin)?;
@@ -1328,6 +1571,51 @@ fn ensure_nvim_link(paths: &Paths) -> Result<()> {
                 paths.nvim_link.display()
             )));
         }
+    }
+    Ok(())
+}
+
+fn validate_activation_destination(paths: &Paths) -> Result<()> {
+    match fs::symlink_metadata(&paths.local_bin) {
+        Ok(metadata) => require_secure_directory(&paths.local_bin, &metadata)?,
+        Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(cause) => {
+            return Err(error(format!(
+                "failed to inspect executable directory {}: {cause}",
+                paths.local_bin.display()
+            )));
+        }
+    }
+    match fs::symlink_metadata(&paths.nvim_link) {
+        Ok(metadata) => validate_existing_nvim_link(paths, &metadata),
+        Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(cause) => Err(error(format!(
+            "failed to inspect executable link {}: {cause}",
+            paths.nvim_link.display()
+        ))),
+    }
+}
+
+fn validate_existing_nvim_link(paths: &Paths, metadata: &fs::Metadata) -> Result<()> {
+    if !metadata.file_type().is_symlink() {
+        return Err(error(format!(
+            "refusing to replace unmanaged executable {}",
+            paths.nvim_link.display()
+        )));
+    }
+    let target = fs::read_link(&paths.nvim_link).map_err(|cause| {
+        error(format!(
+            "failed to read executable symlink {}: {cause}",
+            paths.nvim_link.display()
+        ))
+    })?;
+    let expected = Path::new("../share/nv/active/bin/nvim");
+    if target != expected {
+        return Err(error(format!(
+            "refusing to replace unmanaged executable symlink {} -> {}",
+            paths.nvim_link.display(),
+            target.display()
+        )));
     }
     Ok(())
 }
@@ -1388,55 +1676,14 @@ fn rollback_channel(paths: &Paths, channel: Channel) -> Result<()> {
             "cannot roll back {channel}: no previous installation exists"
         ))
     })?;
-    let current_link = paths.channel_link(channel, "current");
-    let previous_link = paths.channel_link(channel, "previous");
-    let current_temp = current_link.with_file_name(".current.nv-new");
-    let previous_temp = previous_link.with_file_name(".previous.nv-new");
-    for temporary in [&current_temp, &previous_temp] {
-        if fs::symlink_metadata(temporary).is_ok() {
-            return Err(error(format!(
-                "temporary link {} already exists; inspect it and move it to the trash manually",
-                temporary.display()
-            )));
-        }
-    }
-    symlink(
-        channel_relative_target(&previous.directory_name),
-        &current_temp,
-    )
-    .map_err(|cause| {
-        error(format!(
-            "failed to prepare rollback link {}: {cause}",
-            current_temp.display()
-        ))
-    })?;
-    if let Err(cause) = symlink(
-        channel_relative_target(&current.directory_name),
-        &previous_temp,
-    ) {
-        let _ = fs::remove_file(&current_temp);
-        return Err(error(format!(
-            "failed to prepare rollback link {}: {cause}",
-            previous_temp.display()
-        )));
-    }
-
-    // Publishing previous first keeps current valid even if power is lost between renames.
-    if let Err(cause) = fs::rename(&previous_temp, &previous_link) {
-        let _ = fs::remove_file(&current_temp);
-        let _ = fs::remove_file(&previous_temp);
-        return Err(error(format!(
-            "failed to replace rollback pointer {}: {cause}",
-            previous_link.display()
-        )));
-    }
-    fs::rename(&current_temp, &current_link).map_err(|cause| {
-        error(format!(
-            "failed to replace current pointer {} during rollback: {cause}; current remains usable, but inspect {} before the next mutation",
-            current_link.display(),
-            paths.channel_dir(channel).display()
-        ))
-    })?;
+    commit_pointer_transaction(
+        paths,
+        &PointerTransaction {
+            channel,
+            current: previous.directory_name,
+            previous: Some(current.directory_name),
+        },
+    )?;
     let new_current = read_channel_state(paths, channel)?.current.ok_or_else(|| {
         error(format!(
             "rollback left {channel} without a current installation"
@@ -1505,29 +1752,25 @@ fn status(paths: &Paths) -> Result<()> {
                 paths.state.display()
             )));
         }
-        Ok(metadata) => require_real_directory(&paths.state, &metadata)?,
+        Ok(metadata) => require_secure_directory(&paths.state, &metadata)?,
     }
-    if fs::symlink_metadata(&paths.lock).is_ok() {
-        return Err(error(format!(
-            "cannot read a consistent status while operation lock {} exists",
-            paths.lock.display()
-        )));
-    }
-    validate_layout(paths)?;
-    let active = validate_active_channel(paths)?;
-    if active.is_some() {
-        validate_nvim_exposure(paths)?;
-    }
-    println!(
-        "active: {}",
-        active.map_or_else(|| "none".to_owned(), |channel| channel.to_string())
-    );
-    for channel in Channel::ALL {
-        let state = read_channel_state(paths, channel)?;
-        print_status_entry(channel, "current", state.current.as_ref());
-        print_status_entry(channel, "previous", state.previous.as_ref());
-    }
-    Ok(())
+    with_lock(paths, || {
+        validate_layout(paths)?;
+        let active = validate_active_channel(paths)?;
+        if active.is_some() {
+            validate_nvim_exposure(paths)?;
+        }
+        println!(
+            "active: {}",
+            active.map_or_else(|| "none".to_owned(), |channel| channel.to_string())
+        );
+        for channel in Channel::ALL {
+            let state = read_channel_state(paths, channel)?;
+            print_status_entry(channel, "current", state.current.as_ref());
+            print_status_entry(channel, "previous", state.previous.as_ref());
+        }
+        Ok(())
+    })
 }
 
 fn print_empty_status() {

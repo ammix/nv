@@ -56,4 +56,6 @@ against the asset's GitHub-provided SHA-256 digest before extraction. Publicatio
 occurs only after the staged `nvim --version` succeeds.
 
 Mutating operations hold `~/.local/share/nv/operation.lock`. An existing marker
-is treated as active or stale state and must be resolved manually.
+is treated as active or stale state and must be resolved manually. After a stale
+marker is removed, the next command completes any interrupted pointer transaction.
+The state and executable directories must not be writable by group or others.

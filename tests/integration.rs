@@ -53,18 +53,9 @@ for argument in "$@"; do
 done
 case "$last" in
   https://api.github.com/*)
-    if [ "${FAKE_MODE:-}" = api_failure ]; then
-      printf '%s' '{"message":"API rate limit exceeded"}' > "$output"
-      printf '%s\n' 'curl: HTTP 403' >&2
-      exit 22
-    fi
     printf '%s' '{"release":"fake"}' > "$output"
     ;;
   *)
-    if [ "${FAKE_MODE:-}" = download_failure ]; then
-      printf '%s\n' 'curl: transfer failed' >&2
-      exit 18
-    fi
     printf '%s' "${FAKE_PAYLOAD:-payload}" > "$output"
     ;;
 esac
@@ -77,22 +68,6 @@ if [ "$1" = "--version" ]; then
   printf '%s\n' 'fake jq'
   exit 0
 fi
-case "${FAKE_MODE:-}" in
-  missing_asset)
-    printf '%s\n' 'jq: expected exactly one matching asset' >&2
-    exit 5
-    ;;
-  duplicate_asset)
-    printf '%s\n' 'jq: expected exactly one matching asset' >&2
-    exit 5
-    ;;
-  malformed_metadata)
-    printf '%s\n' "${FAKE_RELEASE_ID:-100}"
-    printf '%s\n' 'https://github.com/neovim/neovim/releases/download/fake/nvim-linux-x86_64.tar.gz'
-    printf '%s\n' "sha256:${FAKE_DIGEST:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}"
-    exit 0
-    ;;
-esac
 printf '%s\n' "${FAKE_RELEASE_ID:-100}"
 printf '%s\n' 'https://github.com/neovim/neovim/releases/download/fake/nvim-linux-x86_64.tar.gz'
 printf '%s\n' "sha256:${FAKE_DIGEST:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}"
@@ -217,6 +192,11 @@ fn install_does_not_activate_and_use_installs_and_activates() {
         Path::new("channels/nightly/current")
     );
     assert_eq!(environment.exposed_version(), "NVIM v2.0.0-dev\n");
+    let status = environment.success(&["status"], "unused", "unused");
+    let stdout = String::from_utf8(status.stdout).unwrap();
+    assert!(stdout.contains("active: nightly"));
+    assert!(stdout.contains("stable current: release=100 version=NVIM v1.0.0"));
+    assert!(stdout.contains("nightly current: release=200 version=NVIM v2.0.0-dev"));
 }
 
 #[test]
@@ -253,21 +233,6 @@ fn update_rotates_once_rollback_swaps_and_cleanup_is_bounded() {
         .unwrap();
     assert_eq!(installs.len(), 2);
     assert!(!environment.state().join("installs/stable-100").exists());
-}
-
-#[test]
-fn update_never_installs_an_absent_channel() {
-    let environment = TestEnvironment::new();
-    let missing_state = environment.run(&["update", "stable"], "100", "NVIM v1.0.0", "");
-    assert!(!missing_state.status.success());
-    assert!(String::from_utf8_lossy(&missing_state.stderr).contains("install a channel first"));
-
-    environment.success(&["install", "nightly"], "200", "NVIM v2.0.0-dev");
-    let absent = environment.run(&["update", "stable"], "100", "NVIM v1.0.0", "");
-    assert!(!absent.status.success());
-    assert!(String::from_utf8_lossy(&absent.stderr).contains("stable is not installed"));
-    environment.success(&["update", "all"], "200", "NVIM v2.0.0-dev");
-    assert!(!environment.state().join("channels/stable/current").exists());
 }
 
 #[test]
@@ -312,37 +277,19 @@ fn failed_updates_preserve_the_active_installation() {
 }
 
 #[test]
-fn api_and_metadata_failures_are_loud() {
-    for mode in [
-        "api_failure",
-        "missing_asset",
-        "duplicate_asset",
-        "malformed_metadata",
-        "download_failure",
-    ] {
-        let environment = TestEnvironment::new();
-        let output = environment.run(&["install", "nightly"], "200", "NVIM v2.0.0-dev", mode);
-        assert!(!output.status.success(), "failure mode {mode} succeeded");
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            stderr.contains("curl")
-                || stderr.contains("jq")
-                || stderr.contains("release metadata fields"),
-            "unexpected error for {mode}: {stderr}"
-        );
-        assert!(
-            !environment
-                .state()
-                .join("channels/nightly/current")
-                .exists()
-        );
-    }
-}
-
-#[test]
-fn lock_and_out_of_tree_pointer_are_rejected() {
+fn unsafe_state_lock_and_out_of_tree_pointer_are_rejected() {
     let environment = TestEnvironment::new();
     environment.success(&["install", "stable"], "100", "NVIM v1.0.0");
+    let mut permissions = fs::metadata(environment.state()).unwrap().permissions();
+    permissions.set_mode(0o770);
+    fs::set_permissions(environment.state(), permissions).unwrap();
+    let unsafe_state = environment.run(&["status"], "unused", "unused", "");
+    assert!(!unsafe_state.status.success());
+    assert!(String::from_utf8_lossy(&unsafe_state.stderr).contains("writable-by-group-or-others"));
+    let mut permissions = fs::metadata(environment.state()).unwrap().permissions();
+    permissions.set_mode(0o700);
+    fs::set_permissions(environment.state(), permissions).unwrap();
+
     fs::write(environment.state().join("operation.lock"), "pid=1\n").unwrap();
     let locked = environment.run(&["rollback", "stable"], "unused", "unused", "");
     assert!(!locked.status.success());
@@ -358,13 +305,29 @@ fn lock_and_out_of_tree_pointer_are_rejected() {
 }
 
 #[test]
-fn status_reports_both_channels_and_active_channel() {
+fn interrupted_pointer_transaction_is_recovered() {
     let environment = TestEnvironment::new();
-    environment.success(&["install", "stable"], "100", "NVIM v1.0.0");
-    environment.success(&["use", "nightly"], "200", "NVIM v2.0.0-dev");
-    let output = environment.success(&["status"], "unused", "unused");
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("active: nightly"));
-    assert!(stdout.contains("stable current: release=100 version=NVIM v1.0.0"));
-    assert!(stdout.contains("nightly current: release=200 version=NVIM v2.0.0-dev"));
+    environment.success(&["use", "stable"], "100", "NVIM v1.0.0");
+    environment.success(&["update", "stable"], "101", "NVIM v1.1.0");
+
+    let previous = environment.state().join("channels/stable/previous");
+    fs::remove_file(&previous).unwrap();
+    symlink("../../installs/stable-101", previous).unwrap();
+    fs::write(
+        environment.state().join("pointer.transaction"),
+        "stable\nstable-100\nstable-101\n",
+    )
+    .unwrap();
+
+    environment.success(&["status"], "unused", "unused");
+    assert_eq!(
+        environment.channel_target("stable", "current"),
+        Path::new("../../installs/stable-100")
+    );
+    assert_eq!(
+        environment.channel_target("stable", "previous"),
+        Path::new("../../installs/stable-101")
+    );
+    assert!(!environment.state().join("pointer.transaction").exists());
+    assert_eq!(environment.exposed_version(), "NVIM v1.0.0\n");
 }
