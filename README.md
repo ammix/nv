@@ -3,6 +3,17 @@
 Minimal Neovim version manager for the official Linux x86_64 stable and nightly
 builds. Each channel retains one previous release for rollback.
 
+nv delegates downloading, JSON parsing, checksum verification, and archive
+extraction to standard Linux command-line tools instead of extra Rust crates or
+native implementations.
+
+## Dependencies
+
+- `curl`
+- `jq`
+- `sha256sum`
+- `tar`
+
 ## Install
 
 ```sh
@@ -25,8 +36,7 @@ just clean
 just uninstall
 ```
 
-Requires `curl`, `jq`, `sha256sum`, and `tar`. The selected executable is linked
-at `~/.local/bin/nvim`.
+The selected executable is linked at `~/.local/bin/nvim`.
 
 ## Usage
 
