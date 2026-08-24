@@ -19,7 +19,7 @@ check:
     cargo check --locked
 
 clippy:
-    cargo clippy --locked -- -D warnings
+    cargo clippy --locked --all-targets --all-features -- -D warnings
 
 clean:
     cargo clean
