@@ -766,7 +766,7 @@ fn resolve_release(channel: Channel, staging: &Path) -> Result<RemoteRelease> {
     let filter = r#"
       (.assets // error("missing assets")) as $assets
       | ($assets | map(select(.name == $asset))) as $matches
-      | if ($matches | length) != 1 then error("expected exactly one matching asset") else . end
+      | if ($matches | length) != 1 then error("expected exactly one asset named '\($asset)'; Neovim may have renamed its Linux x86_64 release asset") else . end
       | ($matches[0]) as $asset_data
       | (.id | if type == "number" and . > 0 and . == floor then tostring else error("invalid release id") end),
         ($asset_data.browser_download_url | if type == "string" and length > 0 then . else error("invalid browser_download_url") end),
@@ -828,9 +828,8 @@ fn resolve_release(channel: Channel, staging: &Path) -> Result<RemoteRelease> {
     }
     if size > MAX_ASSET_SIZE {
         return Err(error(format!(
-            "asset size from {} exceeds the {} byte safety limit",
+            "GitHub reports an asset size of {size} bytes from {}, exceeding nv's {MAX_ASSET_SIZE} byte safety limit; raise MAX_ASSET_SIZE if this is an expected Neovim release size",
             response_path.display(),
-            MAX_ASSET_SIZE
         )));
     }
     Ok(RemoteRelease {
