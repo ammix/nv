@@ -43,6 +43,7 @@ The selected executable is linked at `~/.local/bin/nvim`.
 nv install stable|nightly
 nv use stable|nightly
 nv update [stable|nightly]
+nv remove [stable|nightly]
 nv rollback stable|nightly
 nv status
 ```
@@ -50,5 +51,7 @@ nv status
 - `install` installs or updates a channel without changing the selected channel.
 - `use` installs or updates a channel, then selects it.
 - `update` updates all installed channels by default, or one selected channel.
+- `remove` removes all installed channels by default, or one selected channel.
+  Removing the active channel also removes nv's managed executable link.
 - `rollback` swaps a channel's current and previous releases. Running it again
   swaps forward.

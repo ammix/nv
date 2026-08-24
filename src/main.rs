@@ -13,6 +13,7 @@ const USAGE: &str = "Usage:
   nv install stable|nightly
   nv use stable|nightly
   nv update [stable|nightly]
+  nv remove [stable|nightly]
   nv rollback stable|nightly
   nv status
   nv help";
@@ -132,6 +133,8 @@ fn run() -> Result<()> {
         }
         ["update"] => update(&paths, None),
         ["update", channel] => update(&paths, Some(Channel::parse(channel)?)),
+        ["remove"] => remove(&paths, None),
+        ["remove", channel] => remove(&paths, Some(Channel::parse(channel)?)),
         ["rollback", channel] => rollback(&paths, Channel::parse(channel)?),
         ["status"] => status(&paths),
         _ => Err(format!("invalid arguments\n\n{USAGE}").into()),
@@ -296,6 +299,13 @@ fn replace_link(link: &Path, target: &Path) -> Result<()> {
     fs::rename(&temporary, link).with_path("failed to replace", link)
 }
 
+fn remove_link(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Err(cause) if cause.kind() == ErrorKind::NotFound => Ok(()),
+        result => result.with_path("failed to remove", path),
+    }
+}
+
 fn activate(paths: &Paths, channel: Channel) -> Result<()> {
     let current = read_pointer(paths, channel, "current")?
         .ok_or_else(|| format!("{channel} is not installed"))?;
@@ -351,6 +361,20 @@ fn update(paths: &Paths, selection: Option<Channel>) -> Result<()> {
         install(paths, channel)?;
     }
     Ok(())
+}
+
+fn remove(paths: &Paths, selection: Option<Channel>) -> Result<()> {
+    let channels = installed(paths, selection)?;
+    if active_channel(paths).is_some_and(|active| channels.contains(&active)) {
+        remove_link(&paths.active)?;
+        remove_link(&paths.nvim_link)?;
+    }
+    for channel in channels {
+        remove_link(&paths.channel_link(channel, "current"))?;
+        remove_link(&paths.channel_link(channel, "previous"))?;
+        println!("removed {channel}");
+    }
+    cleanup(paths)
 }
 
 fn rollback(paths: &Paths, channel: Channel) -> Result<()> {

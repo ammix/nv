@@ -113,6 +113,10 @@ fn lifecycle() {
     sandbox.ok(&["update", "stable"], "102", "v3");
     assert_eq!(fs::read_dir(sandbox.state("installs")).unwrap().count(), 2);
     assert!(!sandbox.state("installs/stable-101").exists());
+
+    sandbox.ok(&["remove"], "102", "v3");
+    assert!(!sandbox.home.join(".local/bin/nvim").exists());
+    assert_eq!(fs::read_dir(sandbox.state("installs")).unwrap().count(), 0);
 }
 
 #[test]
