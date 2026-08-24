@@ -12,6 +12,7 @@ const NVIM_LINK_TARGET: &str = "../share/nv/active/bin/nvim";
 const USAGE: &str = "Usage:
   nv install stable|nightly
   nv use stable|nightly
+  nv update [stable|nightly]
   nv rollback stable|nightly
   nv status
   nv help";
@@ -129,6 +130,8 @@ fn run() -> Result<()> {
             install(&paths, channel)?;
             activate(&paths, channel)
         }
+        ["update"] => update(&paths, None),
+        ["update", channel] => update(&paths, Some(Channel::parse(channel)?)),
         ["rollback", channel] => rollback(&paths, Channel::parse(channel)?),
         ["status"] => status(&paths),
         _ => Err(format!("invalid arguments\n\n{USAGE}").into()),
@@ -322,6 +325,32 @@ fn active_channel(paths: &Paths) -> Option<Channel> {
     Channel::ALL
         .into_iter()
         .find(|channel| target == active_target(*channel))
+}
+
+fn installed(paths: &Paths, selection: Option<Channel>) -> Result<Vec<Channel>> {
+    let mut channels = Vec::new();
+    for channel in Channel::ALL {
+        if selection.is_none_or(|selected| selected == channel)
+            && read_pointer(paths, channel, "current")?.is_some()
+        {
+            channels.push(channel);
+        }
+    }
+    if channels.is_empty() {
+        return Err(match selection {
+            Some(channel) => format!("{channel} is not installed"),
+            None => "no channels are installed".to_owned(),
+        }
+        .into());
+    }
+    Ok(channels)
+}
+
+fn update(paths: &Paths, selection: Option<Channel>) -> Result<()> {
+    for channel in installed(paths, selection)? {
+        install(paths, channel)?;
+    }
+    Ok(())
 }
 
 fn rollback(paths: &Paths, channel: Channel) -> Result<()> {

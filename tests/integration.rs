@@ -95,4 +95,32 @@ fn lifecycle() {
     sandbox.ok(&["use", "stable"], "100", "v1");
     assert_eq!(sandbox.link("active"), Path::new("channels/stable/current"));
     assert_eq!(sandbox.version(), "v1\n");
+
+    sandbox.ok(&["update"], "101", "v2");
+    assert_eq!(
+        sandbox.link("channels/stable/current"),
+        Path::new("../../installs/stable-101")
+    );
+    assert_eq!(
+        sandbox.link("channels/stable/previous"),
+        Path::new("../../installs/stable-100")
+    );
+    assert_eq!(sandbox.version(), "v2\n");
+
+    sandbox.ok(&["rollback", "stable"], "101", "v2");
+    assert_eq!(sandbox.version(), "v1\n");
+
+    sandbox.ok(&["update", "stable"], "102", "v3");
+    assert_eq!(fs::read_dir(sandbox.state("installs")).unwrap().count(), 2);
+    assert!(!sandbox.state("installs/stable-101").exists());
+}
+
+#[test]
+fn failed_update_keeps_the_active_install() {
+    let sandbox = Sandbox::new("failure");
+    sandbox.ok(&["use", "stable"], "100", "v1");
+    let output = sandbox.nv(&["update", "stable"], "101", "v2", "bad");
+    assert!(!output.status.success());
+    assert_eq!(sandbox.version(), "v1\n");
+    assert!(!sandbox.state("installs/stable-101").exists());
 }
