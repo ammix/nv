@@ -232,7 +232,76 @@ fn update_rotates_once_rollback_swaps_and_cleanup_is_bounded() {
         .collect::<std::result::Result<Vec<_>, _>>()
         .unwrap();
     assert_eq!(installs.len(), 2);
+    assert!(environment.state().join("installs/stable-101").exists());
+    assert!(environment.state().join("installs/stable-102").exists());
     assert!(!environment.state().join("installs/stable-100").exists());
+}
+
+#[test]
+fn update_without_selection_updates_every_installed_channel() {
+    let environment = TestEnvironment::new();
+    environment.success(&["install", "stable"], "100", "NVIM v1.0.0");
+    environment.success(&["install", "nightly"], "200", "NVIM v2.0.0-dev");
+
+    environment.success(&["update"], "300", "NVIM v3.0.0-dev");
+    assert_eq!(
+        environment.channel_target("stable", "current"),
+        Path::new("../../installs/stable-300")
+    );
+    assert_eq!(
+        environment.channel_target("nightly", "current"),
+        Path::new("../../installs/nightly-300")
+    );
+    assert_eq!(
+        environment.channel_target("stable", "previous"),
+        Path::new("../../installs/stable-100")
+    );
+    assert_eq!(
+        environment.channel_target("nightly", "previous"),
+        Path::new("../../installs/nightly-200")
+    );
+}
+
+#[test]
+fn remove_deletes_retained_releases_and_default_update_skips_removed_channels() {
+    let environment = TestEnvironment::new();
+    environment.success(&["install", "stable"], "100", "NVIM v1.0.0");
+    environment.success(&["update", "stable"], "101", "NVIM v1.1.0");
+    environment.success(&["use", "nightly"], "200", "NVIM v2.0.0-dev");
+
+    environment.success(&["remove", "stable"], "unused", "unused");
+    assert!(!environment.state().join("channels/stable/current").exists());
+    assert!(
+        !environment
+            .state()
+            .join("channels/stable/previous")
+            .exists()
+    );
+    assert!(!environment.state().join("installs/stable-100").exists());
+    assert!(!environment.state().join("installs/stable-101").exists());
+    assert_eq!(environment.exposed_version(), "NVIM v2.0.0-dev\n");
+
+    environment.success(&["update"], "201", "NVIM v2.1.0-dev");
+    assert!(!environment.state().join("installs/stable-201").exists());
+    assert_eq!(
+        environment.channel_target("nightly", "current"),
+        Path::new("../../installs/nightly-201")
+    );
+
+    environment.success(&["remove"], "unused", "unused");
+    assert!(!environment.state().join("active").exists());
+    assert!(!environment.home.join(".local/bin/nvim").exists());
+    assert!(
+        fs::read_dir(environment.state().join("installs"))
+            .unwrap()
+            .next()
+            .is_none()
+    );
+    let status = environment.success(&["status"], "unused", "unused");
+    let stdout = String::from_utf8(status.stdout).unwrap();
+    assert!(stdout.contains("active: none"));
+    assert!(stdout.contains("stable current: none"));
+    assert!(stdout.contains("nightly current: none"));
 }
 
 #[test]

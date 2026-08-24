@@ -22,7 +22,8 @@ const ASSET_TIMEOUT_SECONDS: u64 = 600;
 const USAGE: &str = "Usage:
   nv install stable|nightly
   nv use stable|nightly
-  nv update stable|nightly|all
+  nv update [stable|nightly]
+  nv remove [stable|nightly]
   nv rollback stable|nightly
   nv status
   nv help";
@@ -89,14 +90,15 @@ impl fmt::Display for Channel {
 enum Cli {
     Install(Channel),
     Use(Channel),
-    Update(UpdateSelection),
+    Update(ChannelSelection),
+    Remove(ChannelSelection),
     Rollback(Channel),
     Status,
     Help,
 }
 
 #[derive(Debug, Eq, PartialEq)]
-enum UpdateSelection {
+enum ChannelSelection {
     Channel(Channel),
     All,
 }
@@ -115,16 +117,8 @@ impl Cli {
             "install" => Ok(Self::Install(parse_single_channel(&arguments, command)?)),
             "use" => Ok(Self::Use(parse_single_channel(&arguments, command)?)),
             "rollback" => Ok(Self::Rollback(parse_single_channel(&arguments, command)?)),
-            "update" => {
-                require_argument_count(&arguments, 2, command)?;
-                if arguments[1] == "all" {
-                    Ok(Self::Update(UpdateSelection::All))
-                } else {
-                    Ok(Self::Update(UpdateSelection::Channel(Channel::parse(
-                        &arguments[1],
-                    )?)))
-                }
-            }
+            "update" => Ok(Self::Update(parse_channel_selection(&arguments, command)?)),
+            "remove" => Ok(Self::Remove(parse_channel_selection(&arguments, command)?)),
             "status" => {
                 require_argument_count(&arguments, 1, command)?;
                 Ok(Self::Status)
@@ -141,6 +135,19 @@ impl Cli {
 fn parse_single_channel(arguments: &[OsString], command: &str) -> Result<Channel> {
     require_argument_count(arguments, 2, command)?;
     Channel::parse(&arguments[1])
+}
+
+fn parse_channel_selection(arguments: &[OsString], command: &str) -> Result<ChannelSelection> {
+    if arguments.len() > 2 {
+        return Err(error(format!(
+            "invalid arguments for '{command}': expected at most 1, received {}\n\n{USAGE}",
+            arguments.len() - 1
+        )));
+    }
+    match arguments.get(1) {
+        None => Ok(ChannelSelection::All),
+        Some(value) => Ok(ChannelSelection::Channel(Channel::parse(value)?)),
+    }
 }
 
 fn require_argument_count(arguments: &[OsString], expected: usize, command: &str) -> Result<()> {
@@ -516,6 +523,13 @@ fn run() -> Result<()> {
             with_lock(&paths, || {
                 validate_layout(&paths)?;
                 update_installed(&paths, selection)
+            })
+        }
+        Cli::Remove(selection) => {
+            require_state_root(&paths)?;
+            with_lock(&paths, || {
+                validate_layout(&paths)?;
+                remove_installed(&paths, selection)
             })
         }
         Cli::Rollback(channel) => {
@@ -1495,9 +1509,9 @@ fn validate_transaction_install(name: &str, expected_channel: Channel, path: &Pa
     Ok(())
 }
 
-fn update_installed(paths: &Paths, selection: UpdateSelection) -> Result<()> {
+fn update_installed(paths: &Paths, selection: ChannelSelection) -> Result<()> {
     match selection {
-        UpdateSelection::Channel(channel) => {
+        ChannelSelection::Channel(channel) => {
             if read_channel_state(paths, channel)?.current.is_none() {
                 return Err(error(format!(
                     "{channel} is not installed; run 'nv install {channel}' first"
@@ -1505,7 +1519,7 @@ fn update_installed(paths: &Paths, selection: UpdateSelection) -> Result<()> {
             }
             install_channel(paths, channel)
         }
-        UpdateSelection::All => {
+        ChannelSelection::All => {
             let installed: Vec<Channel> = Channel::ALL
                 .into_iter()
                 .filter_map(|channel| match read_channel_state(paths, channel) {
@@ -1525,6 +1539,76 @@ fn update_installed(paths: &Paths, selection: UpdateSelection) -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn remove_installed(paths: &Paths, selection: ChannelSelection) -> Result<()> {
+    let removals = match selection {
+        ChannelSelection::Channel(channel) => {
+            let state = read_channel_state(paths, channel)?;
+            if state.current.is_none() {
+                return Err(error(format!("{channel} is not installed")));
+            }
+            vec![(channel, state)]
+        }
+        ChannelSelection::All => {
+            let removals: Vec<(Channel, ChannelState)> = Channel::ALL
+                .into_iter()
+                .filter_map(|channel| match read_channel_state(paths, channel) {
+                    Ok(state) if state.current.is_some() => Some(Ok((channel, state))),
+                    Ok(_) => None,
+                    Err(cause) => Some(Err(cause)),
+                })
+                .collect::<Result<_>>()?;
+            if removals.is_empty() {
+                return Err(error("no channels are installed"));
+            }
+            removals
+        }
+    };
+    let active = validate_active_channel(paths)?;
+    if active.is_some_and(|active| removals.iter().any(|(channel, _)| *channel == active)) {
+        validate_nvim_exposure(paths)?;
+        deactivate(paths)?;
+    }
+    for (channel, state) in &removals {
+        if state.previous.is_some() {
+            remove_channel_pointer(paths, *channel, "previous")?;
+        }
+        remove_channel_pointer(paths, *channel, "current")?;
+        sync_directory(&paths.channel_dir(*channel))?;
+    }
+    cleanup_unreferenced_installs(paths)?;
+    for (channel, _) in removals {
+        println!("removed {channel}");
+    }
+    Ok(())
+}
+
+fn deactivate(paths: &Paths) -> Result<()> {
+    fs::remove_file(&paths.active).map_err(|cause| {
+        error(format!(
+            "failed to remove active channel link {}: {cause}",
+            paths.active.display()
+        ))
+    })?;
+    sync_directory(&paths.state)?;
+    fs::remove_file(&paths.nvim_link).map_err(|cause| {
+        error(format!(
+            "failed to remove managed executable link {}: {cause}",
+            paths.nvim_link.display()
+        ))
+    })?;
+    sync_directory(&paths.local_bin)
+}
+
+fn remove_channel_pointer(paths: &Paths, channel: Channel, name: &str) -> Result<()> {
+    let path = paths.channel_link(channel, name);
+    fs::remove_file(&path).map_err(|cause| {
+        error(format!(
+            "failed to remove {channel} {name} pointer {}: {cause}",
+            path.display()
+        ))
+    })
 }
 
 fn activate_channel(paths: &Paths, channel: Channel) -> Result<()> {
@@ -1722,6 +1806,7 @@ fn cleanup_unreferenced_installs(paths: &Paths) -> Result<()> {
                 paths.installs.display()
             ))
         })?;
+    let mut unreferenced = Vec::new();
     for entry in entries {
         let name = entry.file_name().into_string().map_err(|_| {
             error(format!(
@@ -1732,13 +1817,16 @@ fn cleanup_unreferenced_installs(paths: &Paths) -> Result<()> {
         let path = entry.path();
         read_installation(paths, &path, None)?;
         if !referenced.contains(&name) {
-            fs::remove_dir_all(&path).map_err(|cause| {
-                error(format!(
-                    "failed to remove unreferenced managed installation {}: {cause}",
-                    path.display()
-                ))
-            })?;
+            unreferenced.push(path);
         }
+    }
+    for path in unreferenced {
+        fs::remove_dir_all(&path).map_err(|cause| {
+            error(format!(
+                "failed to remove unreferenced managed installation {}: {cause}",
+                path.display()
+            ))
+        })?;
     }
     sync_directory(&paths.installs)
 }
@@ -1966,8 +2054,16 @@ mod tests {
             Cli::Use(Channel::Nightly)
         );
         assert_eq!(
-            Cli::parse([OsString::from("update"), OsString::from("all")]).unwrap(),
-            Cli::Update(UpdateSelection::All)
+            Cli::parse([OsString::from("update")]).unwrap(),
+            Cli::Update(ChannelSelection::All)
+        );
+        assert_eq!(
+            Cli::parse([OsString::from("remove"), OsString::from("stable")]).unwrap(),
+            Cli::Remove(ChannelSelection::Channel(Channel::Stable))
+        );
+        assert_eq!(
+            Cli::parse([OsString::from("remove")]).unwrap(),
+            Cli::Remove(ChannelSelection::All)
         );
         assert_eq!(
             Cli::parse([OsString::from("rollback"), OsString::from("stable")]).unwrap(),
@@ -1983,7 +2079,10 @@ mod tests {
             vec!["install"],
             vec!["install", "all"],
             vec!["use", "stable", "extra"],
-            vec!["update"],
+            vec!["update", "all"],
+            vec!["update", "all", "extra"],
+            vec!["remove", "all"],
+            vec!["remove", "nightly", "extra"],
             vec!["rollback"],
             vec!["rollback", "all"],
             vec!["status", "extra"],
