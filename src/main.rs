@@ -4,10 +4,10 @@ use std::error::Error;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::{self, DirBuilder, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{IsTerminal, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt, symlink};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const ASSET_NAME: &str = "nvim-linux-x86_64.tar.gz";
@@ -849,7 +849,6 @@ fn curl_to_file(
 ) -> Result<()> {
     let mut command = Command::new("curl");
     command
-        .arg("--silent")
         .arg("--show-error")
         .arg("--fail-with-body")
         .arg("--location")
@@ -864,9 +863,14 @@ fn curl_to_file(
         .arg("--max-filesize")
         .arg(max_size.to_string())
         .arg("--header")
-        .arg("User-Agent: nv/0.1.0")
+        .arg(concat!("User-Agent: nv/", env!("CARGO_PKG_VERSION")))
         .arg("--output")
         .arg(destination);
+    if !api_request && std::io::stderr().is_terminal() {
+        command.arg("--progress-bar").stderr(Stdio::inherit());
+    } else {
+        command.arg("--silent");
+    }
     if api_request {
         command
             .arg("--header")
