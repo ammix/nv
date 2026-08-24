@@ -15,6 +15,7 @@ const ARCHIVE_ROOT: &str = "nvim-linux-x86_64";
 const GITHUB_API_VERSION: &str = "2026-03-10";
 const STABLE_API_URL: &str = "https://api.github.com/repos/neovim/neovim/releases/latest";
 const NIGHTLY_API_URL: &str = "https://api.github.com/repos/neovim/neovim/releases/tags/nightly";
+const NVIM_LINK_TARGET: &str = "../share/nv/active/bin/nvim";
 const MAX_API_RESPONSE_SIZE: u64 = 10 * 1024 * 1024;
 const MAX_ASSET_SIZE: u64 = 512 * 1024 * 1024;
 const API_TIMEOUT_SECONDS: u64 = 60;
@@ -1358,6 +1359,13 @@ fn read_channel_state(paths: &Paths, channel: Channel) -> Result<ChannelState> {
     Ok(ChannelState { current, previous })
 }
 
+fn read_all_channel_states(paths: &Paths) -> Result<Vec<(Channel, ChannelState)>> {
+    Channel::ALL
+        .into_iter()
+        .map(|channel| Ok((channel, read_channel_state(paths, channel)?)))
+        .collect()
+}
+
 fn read_channel_pointer(
     paths: &Paths,
     channel: Channel,
@@ -1520,14 +1528,10 @@ fn update_installed(paths: &Paths, selection: ChannelSelection) -> Result<()> {
             install_channel(paths, channel)
         }
         ChannelSelection::All => {
-            let installed: Vec<Channel> = Channel::ALL
+            let installed: Vec<Channel> = read_all_channel_states(paths)?
                 .into_iter()
-                .filter_map(|channel| match read_channel_state(paths, channel) {
-                    Ok(state) if state.current.is_some() => Some(Ok(channel)),
-                    Ok(_) => None,
-                    Err(cause) => Some(Err(cause)),
-                })
-                .collect::<Result<_>>()?;
+                .filter_map(|(channel, state)| state.current.is_some().then_some(channel))
+                .collect();
             if installed.is_empty() {
                 return Err(error(
                     "no channels are installed; run 'nv install stable' or 'nv install nightly' first",
@@ -1551,14 +1555,10 @@ fn remove_installed(paths: &Paths, selection: ChannelSelection) -> Result<()> {
             vec![(channel, state)]
         }
         ChannelSelection::All => {
-            let removals: Vec<(Channel, ChannelState)> = Channel::ALL
+            let removals: Vec<(Channel, ChannelState)> = read_all_channel_states(paths)?
                 .into_iter()
-                .filter_map(|channel| match read_channel_state(paths, channel) {
-                    Ok(state) if state.current.is_some() => Some(Ok((channel, state))),
-                    Ok(_) => None,
-                    Err(cause) => Some(Err(cause)),
-                })
-                .collect::<Result<_>>()?;
+                .filter(|(_, state)| state.current.is_some())
+                .collect();
             if removals.is_empty() {
                 return Err(error("no channels are installed"));
             }
@@ -1645,11 +1645,10 @@ fn ensure_nvim_link(paths: &Paths) -> Result<()> {
             )));
         }
     }
-    let expected = Path::new("../share/nv/active/bin/nvim");
     match fs::symlink_metadata(&paths.nvim_link) {
-        Ok(metadata) => validate_existing_nvim_link(paths, &metadata)?,
+        Ok(metadata) => validate_managed_nvim_link(paths, &metadata)?,
         Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => {
-            atomic_symlink_replace(&paths.nvim_link, expected)?;
+            atomic_symlink_replace(&paths.nvim_link, Path::new(NVIM_LINK_TARGET))?;
             sync_directory(&paths.local_bin)?;
         }
         Err(cause) => {
@@ -1674,7 +1673,7 @@ fn validate_activation_destination(paths: &Paths) -> Result<()> {
         }
     }
     match fs::symlink_metadata(&paths.nvim_link) {
-        Ok(metadata) => validate_existing_nvim_link(paths, &metadata),
+        Ok(metadata) => validate_managed_nvim_link(paths, &metadata),
         Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(cause) => Err(error(format!(
             "failed to inspect executable link {}: {cause}",
@@ -1683,10 +1682,10 @@ fn validate_activation_destination(paths: &Paths) -> Result<()> {
     }
 }
 
-fn validate_existing_nvim_link(paths: &Paths, metadata: &fs::Metadata) -> Result<()> {
+fn validate_managed_nvim_link(paths: &Paths, metadata: &fs::Metadata) -> Result<()> {
     if !metadata.file_type().is_symlink() {
         return Err(error(format!(
-            "refusing to replace unmanaged executable {}",
+            "executable path {} is not nv's managed symlink",
             paths.nvim_link.display()
         )));
     }
@@ -1696,10 +1695,9 @@ fn validate_existing_nvim_link(paths: &Paths, metadata: &fs::Metadata) -> Result
             paths.nvim_link.display()
         ))
     })?;
-    let expected = Path::new("../share/nv/active/bin/nvim");
-    if target != expected {
+    if target != Path::new(NVIM_LINK_TARGET) {
         return Err(error(format!(
-            "refusing to replace unmanaged executable symlink {} -> {}",
+            "executable symlink {} has unmanaged target {}",
             paths.nvim_link.display(),
             target.display()
         )));
@@ -1786,8 +1784,7 @@ fn rollback_channel(paths: &Paths, channel: Channel) -> Result<()> {
 
 fn cleanup_unreferenced_installs(paths: &Paths) -> Result<()> {
     let mut referenced = BTreeSet::new();
-    for channel in Channel::ALL {
-        let state = read_channel_state(paths, channel)?;
+    for (_, state) in read_all_channel_states(paths)? {
         for installation in [state.current, state.previous].into_iter().flatten() {
             referenced.insert(installation.directory_name);
         }
@@ -1855,8 +1852,7 @@ fn status(paths: &Paths) -> Result<()> {
             "active: {}",
             active.map_or_else(|| "none".to_owned(), |channel| channel.to_string())
         );
-        for channel in Channel::ALL {
-            let state = read_channel_state(paths, channel)?;
+        for (channel, state) in read_all_channel_states(paths)? {
             print_status_entry(channel, "current", state.current.as_ref());
             print_status_entry(channel, "previous", state.previous.as_ref());
         }
@@ -1889,27 +1885,7 @@ fn validate_nvim_exposure(paths: &Paths) -> Result<()> {
             paths.nvim_link.display()
         ))
     })?;
-    if !metadata.file_type().is_symlink() {
-        return Err(error(format!(
-            "managed executable {} is not a symlink",
-            paths.nvim_link.display()
-        )));
-    }
-    let target = fs::read_link(&paths.nvim_link).map_err(|cause| {
-        error(format!(
-            "failed to read managed executable link {}: {cause}",
-            paths.nvim_link.display()
-        ))
-    })?;
-    let expected = Path::new("../share/nv/active/bin/nvim");
-    if target != expected {
-        return Err(error(format!(
-            "managed executable link {} has unexpected target {}",
-            paths.nvim_link.display(),
-            target.display()
-        )));
-    }
-    Ok(())
+    validate_managed_nvim_link(paths, &metadata)
 }
 
 fn validate_release_id(value: &str) -> Result<()> {
