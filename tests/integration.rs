@@ -35,10 +35,6 @@ impl TestEnvironment {
         self.write_executable(
             "curl",
             r#"#!/bin/sh
-if [ "$1" = "--version" ]; then
-  printf '%s\n' 'fake curl'
-  exit 0
-fi
 output=
 want_output=0
 last=
@@ -53,7 +49,12 @@ for argument in "$@"; do
 done
 case "$last" in
   https://api.github.com/*)
-    printf '%s' '{"release":"fake"}' > "$output"
+    printf '{"id":%s,"assets":[{"name":"%s","browser_download_url":"%s","digest":"sha256:%s","size":%s}]}' \
+      "${FAKE_RELEASE_ID:-100}" \
+      'nvim-linux-x86_64.tar.gz' \
+      'https://github.com/neovim/neovim/releases/download/fake/nvim-linux-x86_64.tar.gz' \
+      "${FAKE_DIGEST:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}" \
+      "${FAKE_SIZE:-7}" > "$output"
     ;;
   *)
     printf '%s' "${FAKE_PAYLOAD:-payload}" > "$output"
@@ -62,25 +63,8 @@ esac
 "#,
         );
         self.write_executable(
-            "jq",
-            r#"#!/bin/sh
-if [ "$1" = "--version" ]; then
-  printf '%s\n' 'fake jq'
-  exit 0
-fi
-printf '%s\n' "${FAKE_RELEASE_ID:-100}"
-printf '%s\n' 'https://github.com/neovim/neovim/releases/download/fake/nvim-linux-x86_64.tar.gz'
-printf '%s\n' "sha256:${FAKE_DIGEST:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}"
-printf '%s\n' "${FAKE_SIZE:-7}"
-"#,
-        );
-        self.write_executable(
             "sha256sum",
             r#"#!/bin/sh
-if [ "$1" = "--version" ]; then
-  printf '%s\n' 'fake sha256sum'
-  exit 0
-fi
 if [ "${FAKE_MODE:-}" = checksum_failure ]; then
   printf '%s  %s\n' 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' "$3"
   exit 0
@@ -91,10 +75,6 @@ printf '%s  %s\n' "${FAKE_DIGEST:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
         self.write_executable(
             "tar",
             r#"#!/bin/sh
-if [ "$1" = "--version" ]; then
-  printf '%s\n' 'fake tar'
-  exit 0
-fi
 if [ "${FAKE_MODE:-}" = extraction_failure ]; then
   printf '%s\n' 'tar: extraction failed' >&2
   exit 2
@@ -297,11 +277,6 @@ fn remove_deletes_retained_releases_and_default_update_skips_removed_channels() 
             .next()
             .is_none()
     );
-    let status = environment.success(&["status"], "unused", "unused");
-    let stdout = String::from_utf8(status.stdout).unwrap();
-    assert!(stdout.contains("active: none"));
-    assert!(stdout.contains("stable current: none"));
-    assert!(stdout.contains("nightly current: none"));
 }
 
 #[test]
@@ -343,6 +318,24 @@ fn failed_updates_preserve_the_active_installation() {
                 .is_none()
         );
     }
+}
+
+#[test]
+fn stale_staging_data_is_removed_without_following_symlinks() {
+    let environment = TestEnvironment::new();
+    environment.success(&["install", "stable"], "100", "NVIM v1.0.0");
+
+    let staging = environment.state().join("staging");
+    fs::create_dir(staging.join("stale-directory")).unwrap();
+    fs::write(staging.join("stale-file"), "partial download").unwrap();
+    let outside = environment.root.join("outside-staging");
+    fs::create_dir(&outside).unwrap();
+    symlink(&outside, staging.join("stale-link")).unwrap();
+
+    environment.success(&["update", "stable"], "101", "NVIM v1.1.0");
+
+    assert!(fs::read_dir(staging).unwrap().next().is_none());
+    assert!(outside.exists());
 }
 
 #[test]

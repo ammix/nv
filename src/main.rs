@@ -46,6 +46,16 @@ fn error(message: impl Into<String>) -> NvError {
     NvError(message.into())
 }
 
+trait IoResultExt<T> {
+    fn with_path(self, operation: &str, path: &Path) -> Result<T>;
+}
+
+impl<T> IoResultExt<T> for std::io::Result<T> {
+    fn with_path(self, operation: &str, path: &Path) -> Result<T> {
+        self.map_err(|cause| error(format!("{operation} at {}: {cause}", path.display())))
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum Channel {
     Stable,
@@ -438,21 +448,7 @@ struct StagingGuard {
 
 impl StagingGuard {
     fn create(paths: &Paths, channel: Channel) -> Result<Self> {
-        if fs::read_dir(&paths.staging)
-            .map_err(|cause| {
-                error(format!(
-                    "failed to inspect staging directory {}: {cause}",
-                    paths.staging.display()
-                ))
-            })?
-            .next()
-            .is_some()
-        {
-            return Err(error(format!(
-                "staging directory {} is not empty; inspect its contents and move stale data to the trash manually",
-                paths.staging.display()
-            )));
-        }
+        clear_staging_directory(&paths.staging)?;
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|cause| error(format!("system clock is before Unix epoch: {cause}")))?
@@ -460,12 +456,7 @@ impl StagingGuard {
         let path = paths
             .staging
             .join(format!("{}-{}-{timestamp}", channel, std::process::id()));
-        fs::create_dir(&path).map_err(|cause| {
-            error(format!(
-                "failed to create staging directory {}: {cause}",
-                path.display()
-            ))
-        })?;
+        fs::create_dir(&path).with_path("failed to create staging directory", &path)?;
         Ok(Self { path, active: true })
     }
 
@@ -501,7 +492,6 @@ fn run() -> Result<()> {
     let paths = Paths::discover()?;
     match cli {
         Cli::Install(channel) => {
-            preflight_external_programs()?;
             prepare_state_root(&paths)?;
             with_lock(&paths, || {
                 ensure_layout(&paths)?;
@@ -509,7 +499,6 @@ fn run() -> Result<()> {
             })
         }
         Cli::Use(channel) => {
-            preflight_external_programs()?;
             prepare_state_root(&paths)?;
             with_lock(&paths, || {
                 ensure_layout(&paths)?;
@@ -519,7 +508,6 @@ fn run() -> Result<()> {
             })
         }
         Cli::Update(selection) => {
-            preflight_external_programs()?;
             require_state_root(&paths)?;
             with_lock(&paths, || {
                 validate_layout(&paths)?;
@@ -552,20 +540,6 @@ fn validate_platform() -> Result<()> {
             env::consts::OS,
             env::consts::ARCH
         )));
-    }
-    Ok(())
-}
-
-fn preflight_external_programs() -> Result<()> {
-    for program in ["curl", "jq", "sha256sum", "tar"] {
-        let output = Command::new(program).arg("--version").output().map_err(|cause| {
-            error(format!(
-                "required program '{program}' is unavailable while checking its version: {cause}"
-            ))
-        })?;
-        if !output.status.success() {
-            return Err(command_failure(program, "version check", &output, None));
-        }
     }
     Ok(())
 }
@@ -641,12 +615,8 @@ fn ensure_layout(paths: &Paths) -> Result<()> {
 
 fn validate_layout(paths: &Paths) -> Result<()> {
     for path in layout_directories(paths) {
-        let metadata = fs::symlink_metadata(&path).map_err(|cause| {
-            error(format!(
-                "required state directory {} is missing or inaccessible: {cause}",
-                path.display()
-            ))
-        })?;
+        let metadata = fs::symlink_metadata(&path)
+            .with_path("required state directory is missing or inaccessible", &path)?;
         require_real_directory(&path, &metadata)?;
     }
     Ok(())
@@ -676,12 +646,9 @@ fn require_secure_directory(path: &Path, metadata: &fs::Metadata) -> Result<()> 
 fn create_private_dir(path: &Path) -> Result<()> {
     let mut builder = DirBuilder::new();
     builder.recursive(true).mode(0o700);
-    builder.create(path).map_err(|cause| {
-        error(format!(
-            "failed to create private directory {}: {cause}",
-            path.display()
-        ))
-    })
+    builder
+        .create(path)
+        .with_path("failed to create private directory", path)
 }
 
 fn install_channel(paths: &Paths, channel: Channel) -> Result<()> {
@@ -720,12 +687,8 @@ fn install_channel(paths: &Paths, channel: Channel) -> Result<()> {
             verify_archive_digest(&archive, &release.sha256)?;
 
             let extraction = staging.path.join("extracted");
-            fs::create_dir(&extraction).map_err(|cause| {
-                error(format!(
-                    "failed to create extraction directory {}: {cause}",
-                    extraction.display()
-                ))
-            })?;
+            fs::create_dir(&extraction)
+                .with_path("failed to create extraction directory", &extraction)?;
             extract_archive(&archive, &extraction)?;
             let installation = validate_extracted_layout(&extraction)?;
             let version = staged_version(&installation)?;
@@ -843,7 +806,7 @@ fn resolve_release(channel: Channel, staging: &Path) -> Result<RemoteRelease> {
     }
     if size > MAX_ASSET_SIZE {
         return Err(error(format!(
-            "GitHub reports an asset size of {size} bytes from {}, exceeding nv's {MAX_ASSET_SIZE} byte safety limit; raise MAX_ASSET_SIZE if this is an expected Neovim release size",
+            "GitHub reports an asset size of {size} bytes from {}, exceeding the maximum supported size of {MAX_ASSET_SIZE} bytes",
             response_path.display(),
         )));
     }
@@ -927,12 +890,7 @@ fn download_asset(release: &RemoteRelease, destination: &Path) -> Result<()> {
 
 fn verify_size(path: &Path, expected: u64) -> Result<()> {
     let actual = fs::metadata(path)
-        .map_err(|cause| {
-            error(format!(
-                "failed to inspect downloaded archive {}: {cause}",
-                path.display()
-            ))
-        })?
+        .with_path("failed to inspect downloaded archive", path)?
         .len();
     if actual != expected {
         return Err(error(format!(
@@ -1023,19 +981,9 @@ fn extract_archive(archive: &Path, destination: &Path) -> Result<()> {
 
 fn validate_extracted_layout(extraction: &Path) -> Result<PathBuf> {
     let entries = fs::read_dir(extraction)
-        .map_err(|cause| {
-            error(format!(
-                "failed to inspect extracted archive {}: {cause}",
-                extraction.display()
-            ))
-        })?
+        .with_path("failed to inspect extracted archive", extraction)?
         .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|cause| {
-            error(format!(
-                "failed to read an entry in extracted archive {}: {cause}",
-                extraction.display()
-            ))
-        })?;
+        .with_path("failed to read an entry in extracted archive", extraction)?;
     if entries.len() != 1 || entries[0].file_name() != OsStr::new(ARCHIVE_ROOT) {
         return Err(error(format!(
             "unexpected archive layout in {}: expected exactly one top-level directory named {ARCHIVE_ROOT}",
@@ -1043,24 +991,18 @@ fn validate_extracted_layout(extraction: &Path) -> Result<PathBuf> {
         )));
     }
     let installation = entries[0].path();
-    let metadata = fs::symlink_metadata(&installation).map_err(|cause| {
-        error(format!(
-            "failed to inspect extracted installation {}: {cause}",
-            installation.display()
-        ))
-    })?;
+    let metadata = fs::symlink_metadata(&installation)
+        .with_path("failed to inspect extracted installation", &installation)?;
     require_real_directory(&installation, &metadata)?;
     validate_nvim_binary(&installation.join("bin/nvim"))?;
     Ok(installation)
 }
 
 fn validate_nvim_binary(path: &Path) -> Result<()> {
-    let metadata = fs::symlink_metadata(path).map_err(|cause| {
-        error(format!(
-            "required Neovim executable {} is missing or inaccessible: {cause}",
-            path.display()
-        ))
-    })?;
+    let metadata = fs::symlink_metadata(path).with_path(
+        "required Neovim executable is missing or inaccessible",
+        path,
+    )?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(error(format!(
             "required Neovim executable {} is not a regular file",
@@ -1116,31 +1058,11 @@ fn write_metadata(path: &Path, metadata: &InstallMetadata) -> Result<()> {
         .write(true)
         .create_new(true)
         .open(path)
-        .map_err(|cause| {
-            error(format!(
-                "failed to create installation metadata {}: {cause}",
-                path.display()
-            ))
-        })?;
+        .with_path("failed to create installation metadata", path)?;
     file.write_all(metadata.serialize().as_bytes())
-        .map_err(|cause| {
-            error(format!(
-                "failed to write installation metadata {}: {cause}",
-                path.display()
-            ))
-        })?;
-    file.flush().map_err(|cause| {
-        error(format!(
-            "failed to flush installation metadata {}: {cause}",
-            path.display()
-        ))
-    })?;
-    file.sync_all().map_err(|cause| {
-        error(format!(
-            "failed to sync installation metadata {}: {cause}",
-            path.display()
-        ))
-    })
+        .with_path("failed to write installation metadata", path)?;
+    file.sync_all()
+        .with_path("failed to sync installation metadata", path)
 }
 
 fn replace_channel_pointers(
@@ -1388,12 +1310,7 @@ fn read_channel_pointer(
             link.display()
         )));
     }
-    let target = fs::read_link(&link).map_err(|cause| {
-        error(format!(
-            "failed to read channel pointer {}: {cause}",
-            link.display()
-        ))
-    })?;
+    let target = fs::read_link(&link).with_path("failed to read channel pointer", &link)?;
     let directory_name = validate_channel_target(&target, channel, &link)?;
     let path = paths.installs.join(&directory_name);
     let metadata = read_installation(paths, &path, Some(channel))?;
@@ -1469,21 +1386,13 @@ fn read_installation(
             path.display()
         )));
     }
-    let directory_metadata = fs::symlink_metadata(path).map_err(|cause| {
-        error(format!(
-            "managed installation {} is missing or inaccessible: {cause}",
-            path.display()
-        ))
-    })?;
+    let directory_metadata = fs::symlink_metadata(path)
+        .with_path("managed installation is missing or inaccessible", path)?;
     require_real_directory(path, &directory_metadata)?;
     validate_nvim_binary(&path.join("bin/nvim"))?;
     let metadata_path = path.join(".nv-metadata");
-    let contents = fs::read_to_string(&metadata_path).map_err(|cause| {
-        error(format!(
-            "failed to read installation metadata {}: {cause}",
-            metadata_path.display()
-        ))
-    })?;
+    let contents = fs::read_to_string(&metadata_path)
+        .with_path("failed to read installation metadata", &metadata_path)?;
     let metadata = InstallMetadata::parse(&contents, &metadata_path)?;
     if metadata.channel != name_channel || metadata.release != name_release {
         return Err(error(format!(
@@ -1585,30 +1494,17 @@ fn remove_installed(paths: &Paths, selection: ChannelSelection) -> Result<()> {
 }
 
 fn deactivate(paths: &Paths) -> Result<()> {
-    fs::remove_file(&paths.active).map_err(|cause| {
-        error(format!(
-            "failed to remove active channel link {}: {cause}",
-            paths.active.display()
-        ))
-    })?;
+    fs::remove_file(&paths.active)
+        .with_path("failed to remove active channel link", &paths.active)?;
     sync_directory(&paths.state)?;
-    fs::remove_file(&paths.nvim_link).map_err(|cause| {
-        error(format!(
-            "failed to remove managed executable link {}: {cause}",
-            paths.nvim_link.display()
-        ))
-    })?;
+    fs::remove_file(&paths.nvim_link)
+        .with_path("failed to remove managed executable link", &paths.nvim_link)?;
     sync_directory(&paths.local_bin)
 }
 
 fn remove_channel_pointer(paths: &Paths, channel: Channel, name: &str) -> Result<()> {
     let path = paths.channel_link(channel, name);
-    fs::remove_file(&path).map_err(|cause| {
-        error(format!(
-            "failed to remove {channel} {name} pointer {}: {cause}",
-            path.display()
-        ))
-    })
+    fs::remove_file(&path).with_path(&format!("failed to remove {channel} {name} pointer"), &path)
 }
 
 fn activate_channel(paths: &Paths, channel: Channel) -> Result<()> {
@@ -1689,12 +1585,8 @@ fn validate_managed_nvim_link(paths: &Paths, metadata: &fs::Metadata) -> Result<
             paths.nvim_link.display()
         )));
     }
-    let target = fs::read_link(&paths.nvim_link).map_err(|cause| {
-        error(format!(
-            "failed to read executable symlink {}: {cause}",
-            paths.nvim_link.display()
-        ))
-    })?;
+    let target = fs::read_link(&paths.nvim_link)
+        .with_path("failed to read executable symlink", &paths.nvim_link)?;
     if target != Path::new(NVIM_LINK_TARGET) {
         return Err(error(format!(
             "executable symlink {} has unmanaged target {}",
@@ -1722,12 +1614,8 @@ fn validate_active_channel(paths: &Paths) -> Result<Option<Channel>> {
             paths.active.display()
         )));
     }
-    let target = fs::read_link(&paths.active).map_err(|cause| {
-        error(format!(
-            "failed to read active channel link {}: {cause}",
-            paths.active.display()
-        ))
-    })?;
+    let target = fs::read_link(&paths.active)
+        .with_path("failed to read active channel link", &paths.active)?;
     for channel in Channel::ALL {
         let expected = PathBuf::from("channels")
             .join(channel.as_str())
@@ -1765,19 +1653,13 @@ fn rollback_channel(paths: &Paths, channel: Channel) -> Result<()> {
         paths,
         &PointerTransaction {
             channel,
-            current: previous.directory_name,
+            current: previous.directory_name.clone(),
             previous: Some(current.directory_name),
         },
     )?;
-    let new_current = read_channel_state(paths, channel)?.current.ok_or_else(|| {
-        error(format!(
-            "rollback left {channel} without a current installation"
-        ))
-    })?;
-    sync_directory(&paths.channel_dir(channel))?;
     println!(
         "rolled back {channel} to {} (release {})",
-        new_current.metadata.version, new_current.metadata.release
+        previous.metadata.version, previous.metadata.release
     );
     Ok(())
 }
@@ -1790,19 +1672,9 @@ fn cleanup_unreferenced_installs(paths: &Paths) -> Result<()> {
         }
     }
     let entries = fs::read_dir(&paths.installs)
-        .map_err(|cause| {
-            error(format!(
-                "failed to inspect installation directory {}: {cause}",
-                paths.installs.display()
-            ))
-        })?
+        .with_path("failed to inspect installation directory", &paths.installs)?
         .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|cause| {
-            error(format!(
-                "failed to read an installation entry in {}: {cause}",
-                paths.installs.display()
-            ))
-        })?;
+        .with_path("failed to read an installation entry", &paths.installs)?;
     let mut unreferenced = Vec::new();
     for entry in entries {
         let name = entry.file_name().into_string().map_err(|_| {
@@ -1818,12 +1690,8 @@ fn cleanup_unreferenced_installs(paths: &Paths) -> Result<()> {
         }
     }
     for path in unreferenced {
-        fs::remove_dir_all(&path).map_err(|cause| {
-            error(format!(
-                "failed to remove unreferenced managed installation {}: {cause}",
-                path.display()
-            ))
-        })?;
+        fs::remove_dir_all(&path)
+            .with_path("failed to remove unreferenced managed installation", &path)?;
     }
     sync_directory(&paths.installs)
 }
@@ -1879,12 +1747,10 @@ fn print_status_entry(channel: Channel, name: &str, installation: Option<&Instal
 }
 
 fn validate_nvim_exposure(paths: &Paths) -> Result<()> {
-    let metadata = fs::symlink_metadata(&paths.nvim_link).map_err(|cause| {
-        error(format!(
-            "active channel exists but executable link {} is missing or inaccessible: {cause}",
-            paths.nvim_link.display()
-        ))
-    })?;
+    let metadata = fs::symlink_metadata(&paths.nvim_link).with_path(
+        "active channel exists but executable link is missing or inaccessible",
+        &paths.nvim_link,
+    )?;
     validate_managed_nvim_link(paths, &metadata)
 }
 
@@ -1972,33 +1838,29 @@ fn command_failure(
 fn sync_directory(path: &Path) -> Result<()> {
     File::open(path)
         .and_then(|directory| directory.sync_all())
-        .map_err(|cause| {
-            error(format!(
-                "failed to sync directory {}: {cause}",
-                path.display()
-            ))
-        })
+        .with_path("failed to sync directory", path)
+}
+
+fn clear_staging_directory(staging: &Path) -> Result<()> {
+    let entries =
+        fs::read_dir(staging).with_path("failed to inspect staging directory", staging)?;
+    for entry in entries {
+        let entry = entry.with_path("failed to read an entry in staging directory", staging)?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .with_path("failed to inspect stale staging entry", &path)?;
+        if file_type.is_dir() {
+            remove_staging_directory(&path)?;
+        } else {
+            fs::remove_file(&path).with_path("failed to remove stale staging entry", &path)?;
+        }
+    }
+    Ok(())
 }
 
 fn remove_staging_directory(path: &Path) -> Result<()> {
-    let parent = path.parent().ok_or_else(|| {
-        error(format!(
-            "refusing to clean staging path without parent: {}",
-            path.display()
-        ))
-    })?;
-    if parent.file_name() != Some(OsStr::new("staging")) {
-        return Err(error(format!(
-            "refusing to clean unmanaged staging path {}",
-            path.display()
-        )));
-    }
-    fs::remove_dir_all(path).map_err(|cause| {
-        error(format!(
-            "failed to remove staging directory {}: {cause}",
-            path.display()
-        ))
-    })
+    fs::remove_dir_all(path).with_path("failed to remove staging directory", path)
 }
 
 #[cfg(test)]
