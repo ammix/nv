@@ -5,6 +5,7 @@ alias c := clean
 alias f := fmt
 alias i := install
 alias t := test
+alias u := uninstall
 alias v := validate
 
 [default]
@@ -37,5 +38,21 @@ run *args:
 
 test:
     cargo test --locked
+
+uninstall:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    state="${HOME:?HOME is not set}/.local/share/nv"
+    nvim_link="$HOME/.local/bin/nvim"
+
+    if [[ ( -e "$nvim_link" || -L "$nvim_link" ) && "$(readlink -- "$nvim_link")" != "../share/nv/active/bin/nvim" ]]; then
+        printf 'refusing to remove unmanaged executable: %s\n' "$nvim_link" >&2
+        exit 1
+    fi
+
+    cargo uninstall nv
+    cargo clean
+    gio trash --force -- "$state" "$nvim_link"
 
 validate: fmt-check test clippy

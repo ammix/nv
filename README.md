@@ -33,6 +33,7 @@ just build
 just test
 just validate
 just clean
+just uninstall
 ```
 
 The selected executable is linked at `~/.local/bin/nvim`.
