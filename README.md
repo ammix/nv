@@ -56,19 +56,3 @@ nv status
   Removing the active channel also removes nv's managed executable link.
 - `rollback` swaps a channel's current and previous releases. Running it again
   swaps forward.
-
-Updates and rollbacks to the selected channel take effect immediately.
-
-## State
-
-State lives under `~/.local/share/nv`. Installations are immutable; channel and
-active pointers are atomically replaced symlinks.
-
-Archives are selected through the GitHub Releases API, size-checked, and verified
-against the asset's GitHub-provided SHA-256 digest before extraction. Publication
-occurs only after the staged `nvim --version` succeeds.
-
-Mutating operations hold `~/.local/share/nv/operation.lock`. An existing marker
-is treated as active or stale state and must be resolved manually. After a stale
-marker is removed, the next command completes any interrupted pointer transaction.
-The state and executable directories must not be writable by group or others.
