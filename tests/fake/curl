@@ -1,0 +1,3 @@
+#!/bin/sh
+while [ "$1" != --output ]; do shift; done
+echo "{\"id\":$RELEASE,\"assets\":[{\"name\":\"nvim-linux-x86_64.tar.gz\",\"browser_download_url\":\"x\",\"digest\":\"sha256:x\"}]}" > "$2"

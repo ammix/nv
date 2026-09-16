@@ -1,0 +1,5 @@
+#!/bin/sh
+while [ "$1" != --directory ]; do shift; done
+mkdir "$2/bin"
+printf '#!/bin/sh\necho %s\n' "$RELEASE" > "$2/bin/nvim"
+chmod +x "$2/bin/nvim"
