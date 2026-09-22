@@ -127,41 +127,51 @@ func run(args []string) error {
 		fmt.Fprintln(stdout, usage)
 		return nil
 	}
+	command, err := parseCommand(args)
+	if err != nil {
+		return err
+	}
 	p, err := newPaths()
 	if err != nil {
 		return err
 	}
+	return command(p)
+}
+
+func parseCommand(args []string) (func(paths) error, error) {
 	if len(args) == 1 {
 		switch args[0] {
 		case "update":
-			return update(p, "")
+			return func(p paths) error { return update(p, "") }, nil
 		case "remove":
-			return remove(p, "")
+			return func(p paths) error { return remove(p, "") }, nil
 		case "status":
-			return status(p)
+			return status, nil
 		}
 	} else if len(args) == 2 && slices.Contains([]string{"install", "use", "update", "remove", "rollback"}, args[0]) {
 		c, err := parseChannel(args[1])
 		if err != nil {
-			return err
+			return nil, err
 		}
 		switch args[0] {
 		case "install":
-			return install(p, c)
+			return func(p paths) error { return install(p, c) }, nil
 		case "use":
-			if err := install(p, c); err != nil {
-				return err
-			}
-			return activate(p, c)
+			return func(p paths) error {
+				if err := install(p, c); err != nil {
+					return err
+				}
+				return activate(p, c)
+			}, nil
 		case "update":
-			return update(p, c)
+			return func(p paths) error { return update(p, c) }, nil
 		case "remove":
-			return remove(p, c)
+			return func(p paths) error { return remove(p, c) }, nil
 		case "rollback":
-			return rollback(p, c)
+			return func(p paths) error { return rollback(p, c) }, nil
 		}
 	}
-	return fmt.Errorf("invalid arguments\n\n%s", usage)
+	return nil, fmt.Errorf("invalid arguments\n\n%s", usage)
 }
 
 func install(p paths, c channel) error {
