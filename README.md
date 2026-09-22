@@ -1,11 +1,8 @@
 # nv
 
-Minimal Neovim version manager for the official Linux x86_64 stable and nightly
-builds. Each channel retains one previous release for rollback.
+Minimal Neovim version manager for Linux stable and nightly builds. Each channel retains one previous release for rollback.
 
-nv is a single static Go binary. Downloading, JSON parsing, checksum
-verification, and archive extraction use only the Go standard library, so it
-needs no external modules or command-line tools.
+nv is a single static Go binary.
 
 ## Install
 
