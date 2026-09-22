@@ -206,13 +206,13 @@ func install(p paths, c channel) error {
 		if err != nil {
 			return err
 		}
+		if err := p.writePointer(c, "current", name); err != nil {
+			return err
+		}
 		if current != "" {
 			if err := p.writePointer(c, "previous", current); err != nil {
 				return err
 			}
-		}
-		if err := p.writePointer(c, "current", name); err != nil {
-			return err
 		}
 		if err := cleanup(p); err != nil {
 			return err
