@@ -155,3 +155,18 @@ func TestUnmanagedLink(t *testing.T) {
 		t.Fatalf("%s was replaced", nvim)
 	}
 }
+
+func TestSymlinkedBin(t *testing.T) {
+	github, home := setup(t)
+	github.release = "100"
+	bin := filepath.Join(home, "bin")
+	os.MkdirAll(bin, 0o755)
+	os.MkdirAll(filepath.Join(home, ".local"), 0o755)
+	os.Symlink(bin, filepath.Join(home, ".local/bin"))
+	must(t, "use", "stable")
+	output, err := exec.Command(filepath.Join(home, ".local/bin/nvim")).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	equal(t, string(output), "100\n")
+}

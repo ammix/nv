@@ -22,7 +22,6 @@ import (
 )
 
 const assetName = "nvim-linux-x86_64.tar.gz"
-const nvimLinkTarget = "../share/nv/active/bin/nvim"
 const usage = `Usage:
   nv install stable|nightly
   nv use stable|nightly
@@ -104,6 +103,10 @@ func newPaths() (paths, error) {
 
 func (p paths) channelLink(c channel, name string) string {
 	return filepath.Join(p.channels, string(c), name)
+}
+
+func (p paths) nvimTarget() string {
+	return filepath.Join(p.active, "bin/nvim")
 }
 
 type release struct {
@@ -427,13 +430,13 @@ func activate(p paths, c channel) error {
 		return fmt.Errorf("%s is not installed", c)
 	}
 	target, err := os.Readlink(p.nvimLink)
-	if !(err == nil && target == nvimLinkTarget || errors.Is(err, fs.ErrNotExist)) {
+	if !(err == nil && target == p.nvimTarget() || errors.Is(err, fs.ErrNotExist)) {
 		return fmt.Errorf("%s is not managed by nv; refusing to replace it", p.nvimLink)
 	}
 	if err := replaceLink(p.active, activeTarget(c)); err != nil {
 		return err
 	}
-	if err := replaceLink(p.nvimLink, nvimLinkTarget); err != nil {
+	if err := replaceLink(p.nvimLink, p.nvimTarget()); err != nil {
 		return err
 	}
 	version, err := nvimVersion(filepath.Join(p.installs, current))
