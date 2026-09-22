@@ -183,6 +183,7 @@ func install(p paths, c channel) error {
 	if err := os.Mkdir(p.staging, 0o755); err != nil {
 		return err
 	}
+	defer os.RemoveAll(p.staging)
 	r, err := resolveRelease(c)
 	if err != nil {
 		return err
@@ -218,7 +219,7 @@ func install(p paths, c channel) error {
 		}
 		fmt.Fprintf(stdout, "installed %s %s (release %d)\n", c, version, r.id)
 	}
-	return os.RemoveAll(p.staging)
+	return nil
 }
 
 func get(url string) (*http.Response, error) {
