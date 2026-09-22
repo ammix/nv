@@ -358,8 +358,6 @@ func extract(archive, dir string) error {
 			err = root.MkdirAll(name, mode)
 		case tar.TypeReg:
 			err = writeFile(root, name, mode, reader)
-		case tar.TypeSymlink:
-			err = root.Symlink(header.Linkname, name)
 		default:
 			err = fmt.Errorf("unsupported entry %s", header.Name)
 		}
