@@ -121,7 +121,9 @@ func TestLifecycle(t *testing.T) {
 	if _, err := os.Lstat(nvim); err == nil {
 		t.Fatalf("%s still exists", nvim)
 	}
-	must(t, "remove")
+	if _, err := nv("remove"); err == nil || !strings.Contains(err.Error(), "no channels are installed") {
+		t.Fatalf("unexpected error: %v", err)
+	}
 }
 
 func TestChecksumMismatch(t *testing.T) {

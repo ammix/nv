@@ -489,8 +489,11 @@ func installed(p paths, selection channel) ([]channel, error) {
 			result = append(result, c)
 		}
 	}
-	if selection != "" && len(result) == 0 {
-		return nil, fmt.Errorf("%s is not installed", selection)
+	if len(result) == 0 {
+		if selection != "" {
+			return nil, fmt.Errorf("%s is not installed", selection)
+		}
+		return nil, errors.New("no channels are installed")
 	}
 	return result, nil
 }
@@ -499,9 +502,6 @@ func update(p paths, selection channel) error {
 	selected, err := installed(p, selection)
 	if err != nil {
 		return err
-	}
-	if len(selected) == 0 {
-		return errors.New("no channels are installed")
 	}
 	for _, c := range selected {
 		if err := install(p, c); err != nil {
