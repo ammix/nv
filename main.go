@@ -157,12 +157,7 @@ func parseCommand(args []string) (func(paths) error, error) {
 		case "install":
 			return func(p paths) error { return install(p, c) }, nil
 		case "use":
-			return func(p paths) error {
-				if err := install(p, c); err != nil {
-					return err
-				}
-				return activate(p, c)
-			}, nil
+			return func(p paths) error { return use(p, c) }, nil
 		case "update":
 			return func(p paths) error { return update(p, c) }, nil
 		case "remove":
@@ -175,6 +170,35 @@ func parseCommand(args []string) (func(paths) error, error) {
 }
 
 func install(p paths, c channel) error {
+	current, err := p.readPointer(c, "current")
+	if err != nil {
+		return err
+	}
+	if current == "" {
+		return updateChannel(p, c)
+	}
+	version, err := nvimVersion(filepath.Join(p.installs, current))
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "%s is already installed: %s (release %s)\n", c, version, releaseID(current))
+	return nil
+}
+
+func use(p paths, c channel) error {
+	current, err := p.readPointer(c, "current")
+	if err != nil {
+		return err
+	}
+	if current == "" {
+		if err := updateChannel(p, c); err != nil {
+			return err
+		}
+	}
+	return activate(p, c)
+}
+
+func updateChannel(p paths, c channel) error {
 	current, err := p.readPointer(c, "current")
 	if err != nil {
 		return err
@@ -435,9 +459,6 @@ func activate(p paths, c channel) error {
 	if err != nil {
 		return err
 	}
-	if current == "" {
-		return fmt.Errorf("%s is not installed", c)
-	}
 	target, err := os.Readlink(p.nvimLink)
 	if !(err == nil && target == p.nvimTarget() || errors.Is(err, fs.ErrNotExist)) {
 		return fmt.Errorf("%s is not managed by nv; refusing to replace it", p.nvimLink)
@@ -502,7 +523,7 @@ func update(p paths, selection channel) error {
 		return err
 	}
 	for _, c := range selected {
-		if err := install(p, c); err != nil {
+		if err := updateChannel(p, c); err != nil {
 			return err
 		}
 	}

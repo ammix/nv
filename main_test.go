@@ -16,12 +16,14 @@ import (
 )
 
 type fakeGitHub struct {
-	url     string
-	release string
-	digest  string
+	url      string
+	release  string
+	digest   string
+	requests int
 }
 
 func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	f.requests++
 	archive := f.archive()
 	switch r.URL.Path {
 	case "/repos/neovim/neovim/releases/latest", "/repos/neovim/neovim/releases/tags/nightly":
@@ -78,10 +80,17 @@ func must(t *testing.T, args ...string) {
 	}
 }
 
-func equal(t *testing.T, got, want string) {
+func equal[T comparable](t *testing.T, got, want T) {
 	t.Helper()
 	if got != want {
-		t.Fatalf("got %q, want %q", got, want)
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+func fails(t *testing.T, message string, args ...string) {
+	t.Helper()
+	if _, err := nv(args...); err == nil || !strings.Contains(err.Error(), message) {
+		t.Fatalf("nv %s: unexpected error: %v", strings.Join(args, " "), err)
 	}
 }
 
@@ -104,9 +113,18 @@ func TestLifecycle(t *testing.T) {
 	must(t, "update")
 	equal(t, version(), "101\n")
 	github.release = "102"
+	requests := github.requests
+	must(t, "use", "stable")
+	equal(t, version(), "101\n")
+	output, err := nv("install", "stable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	equal(t, output, "stable is already installed: 101 (release 101)\n")
+	equal(t, github.requests, requests)
 	must(t, "install", "nightly")
 	equal(t, version(), "101\n")
-	output, err := nv("status")
+	output, err = nv("status")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,23 +133,27 @@ func TestLifecycle(t *testing.T) {
 		"stable previous: release=100 version=100\n"+
 		"nightly current: release=102 version=102\n"+
 		"nightly previous: none\n")
+	fails(t, "no previous installation", "rollback", "nightly")
 	must(t, "rollback", "stable")
 	equal(t, version(), "100\n")
+	github.release = "101"
+	requests = github.requests
+	must(t, "update", "stable")
+	equal(t, version(), "101\n")
+	equal(t, github.requests, requests+1)
 	must(t, "remove")
 	if _, err := os.Lstat(nvim); err == nil {
 		t.Fatalf("%s still exists", nvim)
 	}
-	if _, err := nv("remove"); err == nil || !strings.Contains(err.Error(), "no channels are installed") {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	fails(t, "no channels are installed", "remove")
+	fails(t, "nightly is not installed", "update", "nightly")
+	fails(t, "nightly is not installed", "remove", "nightly")
 }
 
 func TestChecksumMismatch(t *testing.T) {
 	github, _ := setup(t)
 	github.release, github.digest = "100", "bad"
-	if _, err := nv("install", "stable"); err == nil || !strings.Contains(err.Error(), "SHA-256 mismatch") {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	fails(t, "SHA-256 mismatch", "install", "stable")
 	github.digest = ""
 	output, err := nv("status")
 	if err != nil {
@@ -150,9 +172,7 @@ func TestUnmanagedLink(t *testing.T) {
 	nvim := filepath.Join(home, ".local/bin/nvim")
 	os.MkdirAll(filepath.Dir(nvim), 0o755)
 	os.WriteFile(nvim, nil, 0o644)
-	if _, err := nv("use", "stable"); err == nil || !strings.Contains(err.Error(), "not managed by nv") {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	fails(t, "not managed by nv", "use", "stable")
 	if info, err := os.Lstat(nvim); err != nil || !info.Mode().IsRegular() {
 		t.Fatalf("%s was replaced", nvim)
 	}

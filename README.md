@@ -40,9 +40,11 @@ nv rollback stable|nightly
 nv status
 ```
 
-- `install` installs or updates a channel without changing the selected channel.
-- `use` installs or updates a channel, then selects it.
+- `install` installs a channel if it is missing, without changing the selected
+  channel.
+- `use` installs a channel if it is missing, then selects it. It never updates.
 - `update` updates all installed channels by default, or one selected channel.
+  It is the only command that replaces an installed release.
 - `remove` removes all installed channels by default, or one selected channel.
   Removing the active channel also removes nv's managed executable link.
 - `rollback` swaps a channel's current and previous releases. Running it again
