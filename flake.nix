@@ -2,7 +2,7 @@
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
   outputs =
-    { nixpkgs, ... }:
+    { self, nixpkgs, ... }:
     let
       inherit (nixpkgs) lib;
       pkgs = nixpkgs.legacyPackages.x86_64-linux;
@@ -10,7 +10,11 @@
     {
       packages.x86_64-linux.default = pkgs.buildGoModule {
         pname = "nv";
-        version = "0.2.0";
+        version =
+          let
+            date = self.lastModifiedDate;
+          in
+          "0-unstable-${lib.substring 0 4 date}-${lib.substring 4 2 date}-${lib.substring 6 2 date}";
 
         src = lib.fileset.toSource {
           root = ./.;
