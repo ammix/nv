@@ -2,8 +2,6 @@
 
 Minimal Neovim version manager for Linux stable and nightly builds. Each channel retains one previous release for rollback.
 
-nv is a single static Go binary.
-
 ## Install
 
 ```sh
