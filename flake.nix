@@ -10,11 +10,7 @@
     {
       packages.x86_64-linux.default = pkgs.buildGoModule {
         pname = "nv";
-        version =
-          let
-            date = self.lastModifiedDate;
-          in
-          "0-unstable-${lib.substring 0 4 date}-${lib.substring 4 2 date}-${lib.substring 6 2 date}";
+        version = "1.0.0";
 
         src = lib.fileset.toSource {
           root = ./.;
