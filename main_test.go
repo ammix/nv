@@ -73,11 +73,13 @@ func nv(args ...string) (string, error) {
 	return output.String(), err
 }
 
-func must(t *testing.T, args ...string) {
+func must(t *testing.T, args ...string) string {
 	t.Helper()
-	if _, err := nv(args...); err != nil {
+	output, err := nv(args...)
+	if err != nil {
 		t.Fatalf("nv %s: %s", strings.Join(args, " "), err)
 	}
+	return output
 }
 
 func equal[T comparable](t *testing.T, got, want T) {
@@ -116,19 +118,11 @@ func TestLifecycle(t *testing.T) {
 	requests := github.requests
 	must(t, "use", "stable")
 	equal(t, version(), "101\n")
-	output, err := nv("install", "stable")
-	if err != nil {
-		t.Fatal(err)
-	}
-	equal(t, output, "stable is already installed: 101 (release 101)\n")
+	equal(t, must(t, "install", "stable"), "stable is already installed: 101 (release 101)\n")
 	equal(t, github.requests, requests)
 	must(t, "install", "nightly")
 	equal(t, version(), "101\n")
-	output, err = nv("status")
-	if err != nil {
-		t.Fatal(err)
-	}
-	equal(t, output, "active: stable\n"+
+	equal(t, must(t, "status"), "active: stable\n"+
 		"stable current: release=101 version=101\n"+
 		"stable previous: release=100 version=100\n"+
 		"nightly current: release=102 version=102\n"+
@@ -155,11 +149,7 @@ func TestChecksumMismatch(t *testing.T) {
 	github.release, github.digest = "100", "bad"
 	fails(t, "SHA-256 mismatch", "install", "stable")
 	github.digest = ""
-	output, err := nv("status")
-	if err != nil {
-		t.Fatal(err)
-	}
-	equal(t, output, "active: none\n"+
+	equal(t, must(t, "status"), "active: none\n"+
 		"stable current: none\n"+
 		"stable previous: none\n"+
 		"nightly current: none\n"+
