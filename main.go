@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
 	"slices"
 	"time"
 )
@@ -63,10 +62,6 @@ func (c channel) apiURL() string {
 		return apiBase + "/repos/neovim/neovim/releases/latest"
 	}
 	return apiBase + "/repos/neovim/neovim/releases/tags/nightly"
-}
-
-func (c channel) activeTarget() string {
-	return filepath.Join("channels", string(c), "current")
 }
 
 func main() {
@@ -175,9 +170,6 @@ func remove(p paths, selection channel) error {
 		return err
 	}
 	if slices.Contains(selected, activeChannel(p)) {
-		if err := removeLink(p.active); err != nil {
-			return err
-		}
 		if err := removeLink(p.nvimLink); err != nil {
 			return err
 		}

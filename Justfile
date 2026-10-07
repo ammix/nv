@@ -20,9 +20,6 @@ build:
 clean:
     go clean
 
-fix:
-    go fix ./...
-
 fmt:
     gofmt -w .
 

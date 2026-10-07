@@ -16,7 +16,6 @@ type paths struct {
 	installs    string
 	channelsDir string
 	staging     string
-	active      string
 	nvimLink    string
 }
 
@@ -30,7 +29,6 @@ func newPaths() (paths, error) {
 		installs:    filepath.Join(state, "installs"),
 		channelsDir: filepath.Join(state, "channels"),
 		staging:     filepath.Join(state, "staging"),
-		active:      filepath.Join(state, "active"),
 		nvimLink:    filepath.Join(home, ".local/bin/nvim"),
 	}
 	dirs := []string{p.installs, filepath.Dir(p.nvimLink)}
@@ -53,8 +51,8 @@ func (p paths) channelLink(c channel, name string) string {
 	return filepath.Join(p.channelsDir, string(c), name)
 }
 
-func (p paths) nvimTarget() string {
-	return filepath.Join(p.active, "bin/nvim")
+func (p paths) nvimTarget(c channel) string {
+	return filepath.Join(p.channelLink(c, "current"), "bin/nvim")
 }
 
 func (p paths) readPointer(c channel, name string) (string, error) {
@@ -77,15 +75,10 @@ func activate(p paths, c channel) error {
 	if err != nil {
 		return err
 	}
-	target, err := os.Readlink(p.nvimLink)
-	managed := errors.Is(err, fs.ErrNotExist) || err == nil && target == p.nvimTarget()
-	if !managed {
+	if _, err := os.Lstat(p.nvimLink); err == nil && activeChannel(p) == "" {
 		return fmt.Errorf("%s is not managed by nv; refusing to replace it", p.nvimLink)
 	}
-	if err := replaceLink(p.active, c.activeTarget()); err != nil {
-		return err
-	}
-	if err := replaceLink(p.nvimLink, p.nvimTarget()); err != nil {
+	if err := replaceLink(p.nvimLink, p.nvimTarget(c)); err != nil {
 		return err
 	}
 	version, err := nvimVersion(p.installDir(current))
@@ -97,12 +90,12 @@ func activate(p paths, c channel) error {
 }
 
 func activeChannel(p paths) channel {
-	target, err := os.Readlink(p.active)
+	target, err := os.Readlink(p.nvimLink)
 	if err != nil {
 		return ""
 	}
 	for _, c := range channels {
-		if target == c.activeTarget() {
+		if target == p.nvimTarget(c) {
 			return c
 		}
 	}
