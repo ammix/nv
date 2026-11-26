@@ -23,7 +23,11 @@ type release struct {
 }
 
 func resolveRelease(c channel) (release, error) {
-	response, err := get(c.apiURL())
+	url := apiBase + "/repos/neovim/neovim/releases/tags/nightly"
+	if c == stable {
+		url = apiBase + "/repos/neovim/neovim/releases/latest"
+	}
+	response, err := get(url)
 	if err != nil {
 		return release{}, err
 	}
@@ -37,7 +41,7 @@ func resolveRelease(c channel) (release, error) {
 		} `json:"assets"`
 	}
 	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
-		return release{}, fmt.Errorf("unexpected release metadata from %s: %w", c.apiURL(), err)
+		return release{}, fmt.Errorf("unexpected release metadata from %s: %w", url, err)
 	}
 	for _, asset := range body.Assets {
 		if asset.Name != assetName {
@@ -101,12 +105,12 @@ func download(url, destination string) (string, error) {
 }
 
 func fetch(r release, staging, target string) (string, error) {
-	os.RemoveAll(staging)
-	if err := os.Mkdir(staging, 0o755); err != nil {
+	work, err := os.MkdirTemp(staging, "")
+	if err != nil {
 		return "", err
 	}
-	defer os.RemoveAll(staging)
-	archive := filepath.Join(staging, assetName)
+	defer os.RemoveAll(work)
+	archive := filepath.Join(work, assetName)
 	actual, err := download(r.url, archive)
 	if err != nil {
 		return "", err
@@ -114,7 +118,7 @@ func fetch(r release, staging, target string) (string, error) {
 	if actual != r.sha256 {
 		return "", fmt.Errorf("SHA-256 mismatch for %s: expected %s, got %s", archive, r.sha256, actual)
 	}
-	extracted := filepath.Join(staging, "extracted")
+	extracted := filepath.Join(work, "extracted")
 	if err := os.Mkdir(extracted, 0o755); err != nil {
 		return "", err
 	}
@@ -128,7 +132,6 @@ func fetch(r release, staging, target string) (string, error) {
 	return version, os.Rename(extracted, target)
 }
 
-// extract strips the archive's top-level directory, like tar --strip-components=1.
 func extract(archive, dir string) error {
 	file, err := os.Open(archive)
 	if err != nil {
@@ -139,6 +142,7 @@ func extract(archive, dir string) error {
 	if err != nil {
 		return err
 	}
+	defer unzipped.Close()
 	root, err := os.OpenRoot(dir)
 	if err != nil {
 		return err

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -31,7 +32,7 @@ func newPaths() (paths, error) {
 		staging:     filepath.Join(state, "staging"),
 		nvimLink:    filepath.Join(home, ".local/bin/nvim"),
 	}
-	dirs := []string{p.installs, filepath.Dir(p.nvimLink)}
+	dirs := []string{p.installs, p.staging, filepath.Dir(p.nvimLink)}
 	for _, c := range channels {
 		dirs = append(dirs, filepath.Join(p.channelsDir, string(c)))
 	}
@@ -68,25 +69,6 @@ func (p paths) readPointer(c channel, name string) (string, error) {
 
 func (p paths) writePointer(c channel, name, install string) error {
 	return replaceLink(p.channelLink(c, name), filepath.Join("../../installs", install))
-}
-
-func activate(p paths, c channel) error {
-	current, err := p.readPointer(c, "current")
-	if err != nil {
-		return err
-	}
-	if _, err := os.Lstat(p.nvimLink); err == nil && activeChannel(p) == "" {
-		return fmt.Errorf("%s is not managed by nv; refusing to replace it", p.nvimLink)
-	}
-	if err := replaceLink(p.nvimLink, p.nvimTarget(c)); err != nil {
-		return err
-	}
-	version, err := nvimVersion(p.installDir(current))
-	if err != nil {
-		return err
-	}
-	fmt.Fprintf(stdout, "using %s %s (release %s)\n", c, version, releaseID(current))
-	return nil
 }
 
 func activeChannel(p paths) channel {
@@ -129,11 +111,11 @@ func cleanup(p paths) error {
 	var referenced []string
 	for _, c := range channels {
 		for _, name := range pointers {
-			install, err := p.readPointer(c, name)
+			target, err := p.readPointer(c, name)
 			if err != nil {
 				return err
 			}
-			referenced = append(referenced, install)
+			referenced = append(referenced, target)
 		}
 	}
 	entries, err := os.ReadDir(p.installs)
@@ -151,12 +133,15 @@ func cleanup(p paths) error {
 }
 
 func replaceLink(link, target string) error {
-	temporary := link + ".new"
-	os.Remove(temporary)
+	temporary := filepath.Join(filepath.Dir(link), "."+filepath.Base(link)+"."+rand.Text())
 	if err := os.Symlink(target, temporary); err != nil {
 		return err
 	}
-	return os.Rename(temporary, link)
+	if err := os.Rename(temporary, link); err != nil {
+		os.Remove(temporary)
+		return err
+	}
+	return nil
 }
 
 func removeLink(link string) error {

@@ -1,6 +1,6 @@
 # nv
 
-Minimal Neovim version manager for Linux stable and nightly builds. Each channel retains one previous release for rollback.
+Minimal Neovim version manager for Linux x86_64 stable and nightly builds. Each channel retains one previous release for rollback.
 
 ## Install
 

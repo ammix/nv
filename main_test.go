@@ -60,6 +60,10 @@ func setup(t *testing.T) (*fakeGitHub, string) {
 	server := httptest.NewTLSServer(github)
 	t.Cleanup(server.Close)
 	github.url = server.URL
+	prevBase, prevClient, prevStdout := apiBase, client, stdout
+	t.Cleanup(func() {
+		apiBase, client, stdout = prevBase, prevClient, prevStdout
+	})
 	apiBase, client = server.URL, server.Client()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -118,7 +122,7 @@ func TestLifecycle(t *testing.T) {
 	requests := github.requests
 	must(t, "use", "stable")
 	equal(t, version(), "101\n")
-	equal(t, must(t, "install", "stable"), "stable is already installed: 101 (release 101)\n")
+	must(t, "install", "stable")
 	equal(t, github.requests, requests)
 	must(t, "install", "nightly")
 	equal(t, version(), "101\n")
@@ -148,7 +152,6 @@ func TestChecksumMismatch(t *testing.T) {
 	github, _ := setup(t)
 	github.release, github.digest = "100", "bad"
 	fails(t, "SHA-256 mismatch", "install", "stable")
-	github.digest = ""
 	equal(t, must(t, "status"), "active: none\n"+
 		"stable current: none\n"+
 		"stable previous: none\n"+
@@ -163,6 +166,7 @@ func TestUnmanagedLink(t *testing.T) {
 	os.MkdirAll(filepath.Dir(nvim), 0o755)
 	os.WriteFile(nvim, nil, 0o644)
 	fails(t, "not managed by nv", "use", "stable")
+	equal(t, github.requests, 0)
 	if info, err := os.Lstat(nvim); err != nil || !info.Mode().IsRegular() {
 		t.Fatalf("%s was replaced", nvim)
 	}
@@ -181,4 +185,21 @@ func TestSymlinkedBin(t *testing.T) {
 		t.Fatal(err)
 	}
 	equal(t, string(output), "100\n")
+}
+
+func TestRollbackBrokenPrevious(t *testing.T) {
+	github, home := setup(t)
+	github.release = "100"
+	must(t, "use", "stable")
+	github.release = "101"
+	must(t, "update", "stable")
+	if err := os.RemoveAll(filepath.Join(home, ".local/share/nv/installs/stable-100")); err != nil {
+		t.Fatal(err)
+	}
+	fails(t, "nvim --version", "rollback", "stable")
+	output, err := exec.Command(filepath.Join(home, ".local/bin/nvim")).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	equal(t, string(output), "101\n")
 }

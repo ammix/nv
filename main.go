@@ -50,20 +50,6 @@ var channels = []channel{stable, nightly}
 
 var pointers = []string{"current", "previous"}
 
-func parseChannel(value string) (channel, error) {
-	if c := channel(value); slices.Contains(channels, c) {
-		return c, nil
-	}
-	return "", fmt.Errorf("unsupported channel %q; expected stable or nightly", value)
-}
-
-func (c channel) apiURL() string {
-	if c == stable {
-		return apiBase + "/repos/neovim/neovim/releases/latest"
-	}
-	return apiBase + "/repos/neovim/neovim/releases/tags/nightly"
-}
-
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintf(os.Stderr, "nv: %s\n", err)
@@ -112,9 +98,9 @@ func parseCommand(args []string) (func(paths) error, error) {
 			command = rollback
 		}
 		if command != nil {
-			c, err := parseChannel(args[1])
-			if err != nil {
-				return nil, err
+			c := channel(args[1])
+			if !slices.Contains(channels, c) {
+				return nil, fmt.Errorf("unsupported channel %q; expected stable or nightly", args[1])
 			}
 			return func(p paths) error { return command(p, c) }, nil
 		}
@@ -139,6 +125,9 @@ func install(p paths, c channel) error {
 }
 
 func use(p paths, c channel) error {
+	if _, err := os.Lstat(p.nvimLink); err == nil && activeChannel(p) == "" {
+		return fmt.Errorf("%s is not managed by nv; refusing to replace it", p.nvimLink)
+	}
 	current, err := p.readPointer(c, "current")
 	if err != nil {
 		return err
@@ -147,8 +136,20 @@ func use(p paths, c channel) error {
 		if err := updateChannel(p, c); err != nil {
 			return err
 		}
+		current, err = p.readPointer(c, "current")
+		if err != nil {
+			return err
+		}
 	}
-	return activate(p, c)
+	version, err := nvimVersion(p.installDir(current))
+	if err != nil {
+		return err
+	}
+	if err := replaceLink(p.nvimLink, p.nvimTarget(c)); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "using %s %s (release %s)\n", c, version, releaseID(current))
+	return nil
 }
 
 func update(p paths, selection channel) error {
@@ -200,14 +201,14 @@ func rollback(p paths, c channel) error {
 	if previous == "" {
 		return fmt.Errorf("%s has no previous installation", c)
 	}
-	if err := p.writePointer(c, "previous", current); err != nil {
+	version, err := nvimVersion(p.installDir(previous))
+	if err != nil {
 		return err
 	}
 	if err := p.writePointer(c, "current", previous); err != nil {
 		return err
 	}
-	version, err := nvimVersion(p.installDir(previous))
-	if err != nil {
+	if err := p.writePointer(c, "previous", current); err != nil {
 		return err
 	}
 	fmt.Fprintf(stdout, "rolled back %s to %s (release %s)\n", c, version, releaseID(previous))
@@ -222,17 +223,17 @@ func status(p paths) error {
 	fmt.Fprintf(stdout, "active: %s\n", active)
 	for _, c := range channels {
 		for _, name := range pointers {
-			install, err := p.readPointer(c, name)
+			target, err := p.readPointer(c, name)
 			if err != nil {
 				return err
 			}
 			entry := "none"
-			if install != "" {
-				version, err := nvimVersion(p.installDir(install))
+			if target != "" {
+				version, err := nvimVersion(p.installDir(target))
 				if err != nil {
 					version = "unknown"
 				}
-				entry = fmt.Sprintf("release=%s version=%s", releaseID(install), version)
+				entry = fmt.Sprintf("release=%s version=%s", releaseID(target), version)
 			}
 			fmt.Fprintf(stdout, "%s %s: %s\n", c, name, entry)
 		}

@@ -36,8 +36,8 @@ test:
     go test ./...
 
 uninstall:
-    nv remove || true
-    gobin="$(go env GOBIN)"; gopath="$(go env GOPATH)"; gio trash --force -- "${gobin:-${gopath:?}/bin}/nv"
+    go run . remove || true
+    gobin="$(go env GOBIN)"; gopath="$(go env GOPATH)"; gopath="${gopath:?}"; gio trash --force -- "${gobin:-${gopath%%:*}/bin}/nv"
     go clean
     gio trash --force -- "${HOME:?HOME is not set}/.local/share/nv"
 
